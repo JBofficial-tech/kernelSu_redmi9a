@@ -1,4 +1,4 @@
-name: Build KernelSU Direct Boot Image for Redmi 9A
+name: Build KernelSU for Redmi 9A (dandelion)
 
 on:
   workflow_dispatch:
@@ -14,7 +14,7 @@ jobs:
           sudo apt-get install -y bc bison build-essential ccache curl flex git gnupg gperf \
             liblz4-tool libncurses-dev libncurses5 libssl-dev libxml2 libxml2-utils lzop \
             pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev tar wget libelf-dev \
-            python2 python2-minimal device-tree-compiler cpio abootimg
+            python2 python2-minimal device-tree-compiler cpio
           sudo ln -sf /usr/bin/python2 /usr/bin/python
 
       - name: Setup Proton Clang & GCC Toolchains
@@ -23,7 +23,7 @@ jobs:
           git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9.git gcc64
           git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9.git gcc32
 
-      - name: Clone Kernel Source
+      - name: Clone Blossom / Dandelion Kernel Source
         run: |
           git clone --depth=1 https://github.com/zyexro/sashimi_kernel_xiaomi_blossom.git kernel
 
@@ -40,7 +40,7 @@ jobs:
         run: |
           curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s main
 
-      - name: Compile Kernel
+      - name: Configure and Compile Kernel
         working-directory: kernel
         run: |
           export PATH="$(pwd)/../clang/bin:$(pwd)/../gcc64/bin:$(pwd)/../gcc32/bin:$PATH"
@@ -64,29 +64,39 @@ jobs:
           echo "CONFIG_KPROBE_EVENTS=y" >> arch/arm64/configs/$DEFCONFIG
 
           make O=out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-android- CROSS_COMPILE_ARM32=arm-linux-androideabi- $DEFCONFIG
-          make -j$(nproc --all) O=out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-android- CROSS_COMPILE_ARM32=arm-linux-androideabi- KCFLAGS="-w"
+          make -j$(nproc --all) O=out ARCH=arm64 \
+            CC=clang \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-android- \
+            CROSS_COMPILE_ARM32=arm-linux-androideabi- \
+            KCFLAGS="-w"
 
-      - name: Generate Direct Flashable boot.img with Magiskboot
+      - name: Package Flashable AnyKernel3 with Dynamic Partition Fix
         run: |
-          wget https://github.com/topjohnwu/Magisk/releases/download/v27.0/Magisk-v27.0.apk
-          unzip Magisk-v27.0.apk "lib/x86_64/libmagiskboot.so" -d magisk_tools
-          mv magisk_tools/lib/x86_64/libmagiskboot.so ./magiskboot
-          chmod +x magiskboot
-
-          # Build raw kernel binary
-          KERNEL_BIN="kernel/out/arch/arm64/boot/Image.gz-dtb"
-          [ -f "$KERNEL_BIN" ] || KERNEL_BIN="kernel/out/arch/arm64/boot/Image.gz"
-          [ -f "$KERNEL_BIN" ] || KERNEL_BIN="kernel/out/arch/arm64/boot/Image"
-
-          # Create blank ramdisk & build standard AOSP boot image
-          touch empty_ramdisk
-          ./magiskboot cpio empty_ramdisk.cpio "add 0750 empty empty_ramdisk" 2>/dev/null || touch empty_ramdisk.cpio
+          git clone https://github.com/osm0sis/AnyKernel3.git
           
-          # Repack MediaTek boot header (OS Version 11.0.0, Page Size 2048)
-          abootimg --create KernelSU-boot-Redmi9A.img -k $KERNEL_BIN -r empty_ramdisk.cpio -c "pagesize=2048" 2>/dev/null || cp $KERNEL_BIN KernelSU-boot-Redmi9A.img
+          # Copy compiled kernel
+          if [ -f kernel/out/arch/arm64/boot/Image.gz-dtb ]; then
+            cp kernel/out/arch/arm64/boot/Image.gz-dtb AnyKernel3/Image.gz-dtb
+          elif [ -f kernel/out/arch/arm64/boot/Image.gz ]; then
+            cp kernel/out/arch/arm64/boot/Image.gz AnyKernel3/Image.gz
+          elif [ -f kernel/out/arch/arm64/boot/Image ]; then
+            cp kernel/out/arch/arm64/boot/Image AnyKernel3/Image
+          fi
 
-      - name: Upload Direct Boot Image
+          cd AnyKernel3
+          sed -i 's/kernel.string=.*/kernel.string=KernelSU for Redmi 9A by Tech Mind/g' anykernel.sh
+          sed -i 's/do.devicecheck=1/do.devicecheck=0/g' anykernel.sh
+          sed -i 's/do.modules=0/do.modules=0/g' anykernel.sh
+          sed -i 's/do.cleanup=1/do.cleanup=1/g' anykernel.sh
+          sed -i 's/do.cleanuponabort=0/do.cleanuponabort=0/g' anykernel.sh
+          sed -i 's|block=auto;|block=boot; is_slot_device=0;|g' anykernel.sh
+
+          chmod -R 755 tools/ *.sh
+          zip -r9 ../KernelSU-Redmi9A-Flashable.zip ./* -x .git README.md
+
+      - name: Upload Flashable ZIP
         uses: actions/upload-artifact@v4
         with:
-          name: KernelSU-boot-Redmi9A
-          path: KernelSU-boot-Redmi9A.img
+          name: KernelSU-Redmi9A-Flashable
+          path: KernelSU-Redmi9A-Flashable.zip
