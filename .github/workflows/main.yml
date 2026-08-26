@@ -5,121 +5,279 @@ on:
 
 jobs:
   build:
+    name: Build Redmi 9A KernelSU
     runs-on: ubuntu-22.04
 
     steps:
-      - name: Checkout
+
+      # --------------------------------------------------
+      # 1. Checkout repository
+      # --------------------------------------------------
+      - name: Checkout repository
         uses: actions/checkout@v4
 
+      # --------------------------------------------------
+      # 2. Install build dependencies
+      # --------------------------------------------------
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            git bc bison flex build-essential \
-            libssl-dev libelf-dev \
-            python3 zip unzip cpio \
-            rsync wget curl
 
+          sudo apt-get install -y \
+            git \
+            bc \
+            bison \
+            flex \
+            build-essential \
+            libssl-dev \
+            libelf-dev \
+            libncurses5-dev \
+            libncurses-dev \
+            python3 \
+            python3-pip \
+            rsync \
+            cpio \
+            zip \
+            unzip \
+            wget \
+            curl \
+            lzop \
+            device-tree-compiler
+
+      # --------------------------------------------------
+      # 3. Clone kernel source
+      # --------------------------------------------------
+      - name: Clone Blossom kernel source
+        run: |
+          git clone --depth=1 \
+            https://github.com/zyexro/sashimi_kernel_xiaomi_blossom.git \
+            kernel
+
+          cd kernel
+
+          echo "===== Kernel source ====="
+          git remote -v
+
+          echo "===== Kernel version ====="
+          make kernelversion || true
+
+          echo "===== Makefile version ====="
+          head -40 Makefile
+
+      # --------------------------------------------------
+      # 4. Download Android Clang 11
+      # --------------------------------------------------
+      - name: Download Android Clang 11
+        run: |
+          mkdir -p "$HOME/toolchains"
+
+          git clone --depth=1 \
+            https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 \
+            "$HOME/toolchains/clang"
+
+          echo "===== Available Clang versions ====="
+          find "$HOME/toolchains/clang" -maxdepth 2 -type d | head -30
+
+      # --------------------------------------------------
+      # 5. Detect Clang 11
+      # --------------------------------------------------
+      - name: Setup Clang
+        run: |
+          CLANG_DIR=$(find "$HOME/toolchains/clang" \
+            -type f \
+            -path "*/bin/clang" \
+            2>/dev/null | \
+            while read f; do
+              "$f" --version 2>/dev/null | grep -q "11\." && \
+              dirname "$(dirname "$f")" && break
+            done)
+
+          if [ -z "$CLANG_DIR" ]; then
+            echo "ERROR: Android Clang 11 was not found."
+            exit 1
+          fi
+
+          echo "CLANG_DIR=$CLANG_DIR" >> "$GITHUB_ENV"
+          echo "$CLANG_DIR/bin" >> "$GITHUB_PATH"
+
+          echo "===== Selected Clang ====="
+          "$CLANG_DIR/bin/clang" --version
+
+      # --------------------------------------------------
+      # 6. Check kernel version
+      # --------------------------------------------------
+      - name: Check kernel version
+        working-directory: kernel
+        run: |
+          echo "===== Kernel version ====="
+          make kernelversion
+
+          echo "===== Linux version ====="
+          grep -m1 '^VERSION' Makefile || true
+          grep -m1 '^PATCHLEVEL' Makefile || true
+          grep -m1 '^SUBLEVEL' Makefile || true
+
+      # --------------------------------------------------
+      # 7. Locate defconfig
+      # --------------------------------------------------
+      - name: Find Redmi defconfig
+        working-directory: kernel
+        run: |
+          echo "===== Available Redmi/MTK defconfigs ====="
+
+          find arch/arm64/configs -maxdepth 1 -type f \
+            \( -iname "*dandelion*" \
+            -o -iname "*blossom*" \
+            -o -iname "*angelican*" \
+            -o -iname "*mt6765*" \) \
+            -print
+
+      # --------------------------------------------------
+      # 8. Prepare kernel configuration
+      # --------------------------------------------------
+      - name: Prepare kernel configuration
+        working-directory: kernel
+        run: |
+          mkdir -p out
+
+          if [ -f arch/arm64/configs/dandelion_defconfig ]; then
+            echo "Using dandelion_defconfig"
+            make O=out ARCH=arm64 dandelion_defconfig
+
+          elif [ -f arch/arm64/configs/blossom_defconfig ]; then
+            echo "Using blossom_defconfig"
+            make O=out ARCH=arm64 blossom_defconfig
+
+          elif [ -f arch/arm64/configs/angelican_defconfig ]; then
+            echo "Using angelican_defconfig"
+            make O=out ARCH=arm64 angelican_defconfig
+
+          else
+            echo "ERROR: No suitable Redmi 9A defconfig found."
+            echo "Available configs:"
+            find arch/arm64/configs -maxdepth 1 -type f | sort | tail -100
+            exit 1
+          fi
+
+      # --------------------------------------------------
+      # 9. Clone KernelSU-Next
+      # --------------------------------------------------
       - name: Clone KernelSU-Next
         run: |
           git clone --depth=1 \
             https://github.com/KernelSU-Next/KernelSU-Next.git \
             KernelSU-Next
 
-      - name: Clone candidate Blossom kernel
-        run: |
-          git clone --depth=1 \
-            https://github.com/zyexro/sashimi_kernel_xiaomi_blossom.git \
-            kernel
+          echo "===== KernelSU-Next revision ====="
+          cd KernelSU-Next
+          git log -1 --oneline
 
-      - name: Show kernel version
-        working-directory: kernel
-        run: |
-          make kernelversion
-          head -40 Makefile
-
-      - name: Stop if kernel is not 4.19
-        working-directory: kernel
-        run: |
-          VERSION=$(make kernelversion)
-          echo "Detected kernel: $VERSION"
-          case "$VERSION" in
-            4.19.*) ;;
-            *) echo "ERROR: Kernel is not 4.19.x"; exit 1 ;;
-          esac
-
+      # --------------------------------------------------
+      # 10. Integrate KernelSU-Next
+      # --------------------------------------------------
       - name: Integrate KernelSU-Next
         working-directory: kernel
         run: |
-          ../KernelSU-Next/kernel/setup.sh
-
-      - name: Prepare config
-        working-directory: kernel
-        run: |
-          if [ -f arch/arm64/configs/dandelion_defconfig ]; then
-            make O=out ARCH=arm64 dandelion_defconfig
-          elif [ -f arch/arm64/configs/blossom_defconfig ]; then
-            make O=out ARCH=arm64 blossom_defconfig
-          elif [ -f arch/arm64/configs/angelican_defconfig ]; then
-            make O=out ARCH=arm64 angelican_defconfig
-          else
-            echo "ERROR: No Redmi 9A/Blossom defconfig found"
+          if [ ! -f ../KernelSU-Next/kernel/setup.sh ]; then
+            echo "ERROR: KernelSU-Next setup.sh not found."
             exit 1
           fi
 
-      - name: Enable KernelSU
+          ../KernelSU-Next/kernel/setup.sh
+
+      # --------------------------------------------------
+      # 11. Enable KernelSU
+      # --------------------------------------------------
+      - name: Configure KernelSU
         working-directory: kernel
         run: |
-          ./scripts/config --file out/.config \
+          if [ ! -f out/.config ]; then
+            echo "ERROR: kernel config was not generated."
+            exit 1
+          fi
+
+          ./scripts/config \
+            --file out/.config \
             --enable CONFIG_KSU
+
           make O=out ARCH=arm64 olddefconfig
 
+          echo "===== KernelSU configuration ====="
+          grep -E '^CONFIG_KSU' out/.config || true
+
+      # --------------------------------------------------
+      # 12. Build scripts first
+      # --------------------------------------------------
+      - name: Build kernel scripts
+        working-directory: kernel
+        env:
+          ARCH: arm64
+          CROSS_COMPILE: aarch64-linux-android-
+          CC: clang
+        run: |
+          echo "===== Compiler ====="
+          clang --version
+
+          echo "===== Building scripts ====="
+
+          make -j2 \
+            O=out \
+            ARCH=arm64 \
+            CC=clang \
+            HOSTCC=clang \
+            HOSTCXX=clang++ \
+            HOSTLD=ld.lld \
+            scripts
+
+      # --------------------------------------------------
+      # 13. Build kernel
+      # --------------------------------------------------
       - name: Build kernel
         working-directory: kernel
+        env:
+          ARCH: arm64
+          CROSS_COMPILE: aarch64-linux-android-
+          CC: clang
         run: |
-          export ARCH=arm64
-          export LLVM=1
-          export LLVM_IAS=1
+          echo "===== Starting kernel build ====="
 
           make -j$(nproc) \
             O=out \
             ARCH=arm64 \
             CC=clang \
-            LD=ld.lld \
-            AR=llvm-ar \
-            NM=llvm-nm \
-            OBJCOPY=llvm-objcopy \
-            OBJDUMP=llvm-objdump \
-            STRIP=llvm-strip \
+            HOSTCC=clang \
+            HOSTCXX=clang++ \
+            HOSTLD=ld.lld \
             Image.gz
 
+      # --------------------------------------------------
+      # 14. Collect output
+      # --------------------------------------------------
       - name: Collect kernel
         run: |
           mkdir -p output
 
           if [ -f kernel/out/arch/arm64/boot/Image.gz ]; then
-            cp kernel/out/arch/arm64/boot/Image.gz output/
+            cp kernel/out/arch/arm64/boot/Image.gz \
+              output/Image.gz
           fi
 
-          if [ -f kernel/out/arch/arm64/boot/Image.gz-dtb ]; then
-            cp kernel/out/arch/arm64/boot/Image.gz-dtb output/
+          if [ -f kernel/out/arch/arm64/boot/Image ]; then
+            cp kernel/out/arch/arm64/boot/Image \
+              output/Image
           fi
 
-          cp kernel/out/.config output/kernel-config
+          cp kernel/out/.config \
+            output/kernel-config
 
-          echo "===== OUTPUT ====="
+          echo "===== Build output ====="
           ls -lah output
 
-      - name: Package artifact
-        run: |
-          cd output
-          zip -r ../redmi9a-kernelsu.zip .
-          cd ..
-
-      - name: Upload kernel
+      # --------------------------------------------------
+      # 15. Upload artifact
+      # --------------------------------------------------
+      - name: Upload kernel artifact
         uses: actions/upload-artifact@v4
         with:
           name: Redmi9A-KernelSU
-          path: |
-            redmi9a-kernelsu.zip
-            output/
+          path: output/
