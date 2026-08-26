@@ -1,4 +1,4 @@
-name: Build KernelSU for Redmi 9A (dandelion)
+name: Redmi 9A KernelSU Build
 
 on:
   workflow_dispatch:
@@ -6,72 +6,120 @@ on:
 jobs:
   build:
     runs-on: ubuntu-22.04
+
     steps:
-      - name: Setup Build Dependencies & Python 2
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y bc bison build-essential ccache curl flex git gnupg gperf liblz4-tool libncurses-dev libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev tar wget libelf-dev python2 python2-minimal
-          sudo ln -sf /usr/bin/python2 /usr/bin/python
+          sudo apt-get install -y \
+            git bc bison flex build-essential \
+            libssl-dev libelf-dev \
+            python3 zip unzip cpio \
+            rsync wget curl
 
-      - name: Setup Proton Clang & GCC Toolchains
+      - name: Clone KernelSU-Next
         run: |
-          git clone --depth=1 https://github.com/kdrag0n/proton-clang clang
-          git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9.git gcc64
-          git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9.git gcc32
+          git clone --depth=1 \
+            https://github.com/KernelSU-Next/KernelSU-Next.git \
+            KernelSU-Next
 
-      - name: Checkout Kernel Source (4.19 Tree)
+      - name: Clone candidate Blossom kernel
         run: |
-          git clone --depth=1 https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git -b dandelion-q-oss kernel_src || \
-          git clone --depth=1 https://github.com/dandelion-devs/android_kernel_xiaomi_dandelion -b 4.19 kernel_src
+          git clone --depth=1 \
+            https://github.com/zyexro/sashimi_kernel_xiaomi_blossom.git \
+            kernel
 
-      - name: Patch Python Shebangs in DCT Tools
+      - name: Show kernel version
+        working-directory: kernel
         run: |
-          cd kernel_src
-          if [ -d "tools/dct" ]; then
-            find tools/dct -type f -name "*.py" -exec sed -i 's|#!/usr/bin/env python$|#!/usr/bin/env python2|g' {} +
-            find tools/dct -type f -name "*.py" -exec sed -i 's|#!/usr/bin/python$|#!/usr/bin/python2|g' {} +
+          make kernelversion
+          head -40 Makefile
+
+      - name: Stop if kernel is not 4.19
+        working-directory: kernel
+        run: |
+          VERSION=$(make kernelversion)
+          echo "Detected kernel: $VERSION"
+          case "$VERSION" in
+            4.19.*) ;;
+            *) echo "ERROR: Kernel is not 4.19.x"; exit 1 ;;
+          esac
+
+      - name: Integrate KernelSU-Next
+        working-directory: kernel
+        run: |
+          ../KernelSU-Next/kernel/setup.sh
+
+      - name: Prepare config
+        working-directory: kernel
+        run: |
+          if [ -f arch/arm64/configs/dandelion_defconfig ]; then
+            make O=out ARCH=arm64 dandelion_defconfig
+          elif [ -f arch/arm64/configs/blossom_defconfig ]; then
+            make O=out ARCH=arm64 blossom_defconfig
+          elif [ -f arch/arm64/configs/angelican_defconfig ]; then
+            make O=out ARCH=arm64 angelican_defconfig
+          else
+            echo "ERROR: No Redmi 9A/Blossom defconfig found"
+            exit 1
           fi
 
-      - name: Integrate KernelSU
+      - name: Enable KernelSU
+        working-directory: kernel
         run: |
-          cd kernel_src
-          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s main
-          
-          DEFCONFIG="arch/arm64/configs/dandelion_defconfig"
-          [ -f "$DEFCONFIG" ] || DEFCONFIG=$(find arch/arm64/configs/ -name "*defconfig" | head -n 1)
-          
-          echo "CONFIG_KSU=y" >> $DEFCONFIG
-          echo "CONFIG_KPROBES=y" >> $DEFCONFIG
-          echo "CONFIG_HAVE_KPROBES=y" >> $DEFCONFIG
-          echo "CONFIG_KPROBE_EVENTS=y" >> $DEFCONFIG
+          ./scripts/config --file out/.config \
+            --enable CONFIG_KSU
+          make O=out ARCH=arm64 olddefconfig
 
-      - name: Compile Kernel
+      - name: Build kernel
+        working-directory: kernel
         run: |
-          cd kernel_src
-          export PATH="$(pwd)/../clang/bin:$(pwd)/../gcc64/bin:$(pwd)/../gcc32/bin:$PATH"
-          mkdir out
-          
-          DEFCONFIG="dandelion_defconfig"
-          [ -f "arch/arm64/configs/$DEFCONFIG" ] || DEFCONFIG=$(find arch/arm64/configs/ -name "*defconfig" -exec basename {} \; | head -n 1)
-          
-          make O=out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-android- CROSS_COMPILE_ARM32=arm-linux-androideabi- $DEFCONFIG
-          make -j$(nproc --all) O=out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-android- CROSS_COMPILE_ARM32=arm-linux-androideabi- KCFLAGS="-w"
+          export ARCH=arm64
+          export LLVM=1
+          export LLVM_IAS=1
 
-      - name: Package AnyKernel3
+          make -j$(nproc) \
+            O=out \
+            ARCH=arm64 \
+            CC=clang \
+            LD=ld.lld \
+            AR=llvm-ar \
+            NM=llvm-nm \
+            OBJCOPY=llvm-objcopy \
+            OBJDUMP=llvm-objdump \
+            STRIP=llvm-strip \
+            Image.gz
+
+      - name: Collect kernel
         run: |
-          git clone https://github.com/osm0sis/AnyKernel3
-          cp kernel_src/out/arch/arm64/boot/Image.gz-dtb AnyKernel3/Image.gz-dtb 2>/dev/null || cp kernel_src/out/arch/arm64/boot/Image.gz AnyKernel3/Image.gz 2>/dev/null || cp kernel_src/out/arch/arm64/boot/Image AnyKernel3/Image 2>/dev/null
-          
-          cd AnyKernel3
-          sed -i 's/kernel.string=.*/kernel.string=KernelSU for Redmi 9A by Tech Mind/g' anykernel.sh
-          sed -i 's/do.devicecheck=1/do.devicecheck=0/g' anykernel.sh
-          sed -i 's|block=.*;|block=/dev/block/by-name/boot;|g' anykernel.sh
-          
-          chmod -R 755 tools/ *.sh
-          zip -r9 ../KernelSU-Redmi9A-Flashable.zip ./* -x .git README.md
+          mkdir -p output
 
-      - name: Upload Artifact
+          if [ -f kernel/out/arch/arm64/boot/Image.gz ]; then
+            cp kernel/out/arch/arm64/boot/Image.gz output/
+          fi
+
+          if [ -f kernel/out/arch/arm64/boot/Image.gz-dtb ]; then
+            cp kernel/out/arch/arm64/boot/Image.gz-dtb output/
+          fi
+
+          cp kernel/out/.config output/kernel-config
+
+          echo "===== OUTPUT ====="
+          ls -lah output
+
+      - name: Package artifact
+        run: |
+          cd output
+          zip -r ../redmi9a-kernelsu.zip .
+          cd ..
+
+      - name: Upload kernel
         uses: actions/upload-artifact@v4
         with:
-          name: KernelSU-Redmi9A-Flashable
-          path: KernelSU-Redmi9A-Flashable.zip
+          name: Redmi9A-KernelSU
+          path: |
+            redmi9a-kernelsu.zip
+            output/
