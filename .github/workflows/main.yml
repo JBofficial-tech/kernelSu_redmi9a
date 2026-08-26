@@ -1,19 +1,110 @@
-- name: Install AOSP Clang toolchain
+name: Redmi 9A KernelSU Build
+
+'on':
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
         run: |
-          set -e
+          sudo apt-get update
+          sudo apt-get install -y git bc bison flex build-essential libssl-dev libelf-dev libncurses5-dev python3 rsync cpio zip unzip wget curl
 
-          mkdir -p "$HOME/toolchains"
+      - name: Clone kernel source
+        run: |
+          git clone --depth=1 https://github.com/zyexro/sashimi_kernel_xiaomi_blossom.git kernel
 
-          wget -q --show-progress \
-            "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/bd96dfe349c962681f0e5388af874c771ef96670/clang-r416183b.tar.gz" \
-            -O "$HOME/clang.tar.gz"
+      - name: Check source
+        working-directory: kernel
+        run: |
+          echo "Kernel version:"
+          make kernelversion
+          echo "Commit:"
+          git log -1 --oneline
 
-          mkdir -p "$HOME/toolchains/clang-r416183b"
+      - name: Show available defconfigs
+        working-directory: kernel
+        run: |
+          find arch/arm64/configs -maxdepth 1 -type f \
+            | grep -Ei 'dandelion|blossom|angelican|mt6765' || true
 
-          tar -xzf "$HOME/clang.tar.gz" \
-            -C "$HOME/toolchains/clang-r416183b"
+      - name: Prepare config
+        working-directory: kernel
+        run: |
+          mkdir -p out
 
-          echo "$HOME/toolchains/clang-r416183b/clang-r416183b/bin" >> "$GITHUB_PATH"
+          if [ -f arch/arm64/configs/dandelion_defconfig ]; then
+            make O=out ARCH=arm64 dandelion_defconfig
+          elif [ -f arch/arm64/configs/blossom_defconfig ]; then
+            make O=out ARCH=arm64 blossom_defconfig
+          elif [ -f arch/arm64/configs/angelican_defconfig ]; then
+            make O=out ARCH=arm64 angelican_defconfig
+          else
+            echo "No Redmi 9A defconfig found"
+            exit 1
+          fi
 
-          echo "===== CLANG ====="
-          "$HOME/toolchains/clang-r416183b/clang-r416183b/bin/clang" --version
+      - name: Clone KernelSU Next
+        run: |
+          git clone --depth=1 https://github.com/KernelSU-Next/KernelSU-Next.git KernelSU-Next
+
+      - name: Integrate KernelSU
+        working-directory: kernel
+        run: |
+          ../KernelSU-Next/kernel/setup.sh
+
+      - name: Enable KernelSU
+        working-directory: kernel
+        run: |
+          ./scripts/config --file out/.config --enable CONFIG_KSU
+          make O=out ARCH=arm64 olddefconfig
+          grep CONFIG_KSU out/.config || true
+
+      - name: Install LLVM
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld llvm
+
+      - name: Show compiler
+        run: |
+          clang --version
+          ld.lld --version
+
+      - name: Build kernel
+        working-directory: kernel
+        run: |
+          export ARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
+
+          make -j2 \
+            O=out \
+            ARCH=arm64 \
+            CC=clang \
+            HOSTCC=clang \
+            HOSTCXX=clang++ \
+            HOSTLD=ld.lld \
+            Image.gz
+
+      - name: Collect output
+        run: |
+          mkdir -p output
+
+          if [ -f kernel/out/arch/arm64/boot/Image.gz ]; then
+            cp kernel/out/arch/arm64/boot/Image.gz output/
+          fi
+
+          cp kernel/out/.config output/kernel-config
+
+          ls -lah output
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Redmi9A-KernelSU
+          path: output/
