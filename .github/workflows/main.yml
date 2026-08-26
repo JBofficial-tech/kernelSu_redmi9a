@@ -1,4 +1,4 @@
-name: Redmi 9A KernelSU Build
+name: Redmi 9A KernelSU - Diagnostic Build
 
 'on':
   workflow_dispatch:
@@ -8,103 +8,162 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-      - name: Checkout
+
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y git bc bison flex build-essential libssl-dev libelf-dev libncurses5-dev python3 rsync cpio zip unzip wget curl
+          sudo apt-get install -y \
+            git \
+            bc \
+            bison \
+            flex \
+            build-essential \
+            clang \
+            lld \
+            llvm \
+            libssl-dev \
+            libelf-dev \
+            libncurses5-dev \
+            libncurses-dev \
+            python3 \
+            rsync \
+            cpio \
+            zip \
+            unzip \
+            wget \
+            curl \
+            device-tree-compiler
 
-      - name: Clone kernel source
+      - name: Show compiler
         run: |
-          git clone --depth=1 https://github.com/zyexro/sashimi_kernel_xiaomi_blossom.git kernel
+          echo "===== CLANG ====="
+          clang --version
 
-      - name: Check source
+          echo "===== LLD ====="
+          ld.lld --version
+
+          echo "===== GCC ====="
+          gcc --version | head -1
+
+      - name: Clone Blossom kernel source
+        run: |
+          git clone --depth=1 \
+            https://github.com/zyexro/sashimi_kernel_xiaomi_blossom.git \
+            kernel
+
+      - name: Check kernel source
         working-directory: kernel
         run: |
-          echo "Kernel version:"
-          make kernelversion
-          echo "Commit:"
+          echo "===== GIT ====="
           git log -1 --oneline
 
-      - name: Show available defconfigs
+          echo "===== KERNEL VERSION ====="
+          make kernelversion
+
+          echo "===== TOP LEVEL ====="
+          ls -la
+
+      - name: Find Redmi defconfig
         working-directory: kernel
         run: |
-          find arch/arm64/configs -maxdepth 1 -type f \
-            | grep -Ei 'dandelion|blossom|angelican|mt6765' || true
+          echo "===== POSSIBLE CONFIGS ====="
 
-      - name: Prepare config
+          find arch/arm64/configs \
+            -maxdepth 1 \
+            -type f \
+            \( \
+              -iname "*dandelion*" \
+              -o -iname "*blossom*" \
+              -o -iname "*angelican*" \
+              -o -iname "*mt6765*" \
+            \) \
+            -print
+
+      - name: Prepare kernel config
         working-directory: kernel
         run: |
           mkdir -p out
 
           if [ -f arch/arm64/configs/dandelion_defconfig ]; then
+            echo "Using dandelion_defconfig"
             make O=out ARCH=arm64 dandelion_defconfig
+
           elif [ -f arch/arm64/configs/blossom_defconfig ]; then
+            echo "Using blossom_defconfig"
             make O=out ARCH=arm64 blossom_defconfig
+
           elif [ -f arch/arm64/configs/angelican_defconfig ]; then
+            echo "Using angelican_defconfig"
             make O=out ARCH=arm64 angelican_defconfig
+
           else
-            echo "No Redmi 9A defconfig found"
+            echo "ERROR: Redmi defconfig not found"
             exit 1
           fi
 
       - name: Clone KernelSU Next
         run: |
-          git clone --depth=1 https://github.com/KernelSU-Next/KernelSU-Next.git KernelSU-Next
+          git clone --depth=1 \
+            https://github.com/KernelSU-Next/KernelSU-Next.git \
+            KernelSU-Next
+
+          echo "===== KERNELSU REVISION ====="
+          cd KernelSU-Next
+          git log -1 --oneline
 
       - name: Integrate KernelSU
         working-directory: kernel
         run: |
+          if [ ! -f ../KernelSU-Next/kernel/setup.sh ]; then
+            echo "ERROR: KernelSU setup.sh not found"
+            exit 1
+          fi
+
           ../KernelSU-Next/kernel/setup.sh
 
       - name: Enable KernelSU
         working-directory: kernel
         run: |
-          ./scripts/config --file out/.config --enable CONFIG_KSU
+          ./scripts/config \
+            --file out/.config \
+            --enable CONFIG_KSU
+
           make O=out ARCH=arm64 olddefconfig
-          grep CONFIG_KSU out/.config || true
 
-      - name: Install LLVM
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y clang lld llvm
+          echo "===== KSU CONFIG ====="
+          grep -E 'CONFIG_KSU' out/.config || true
 
-      - name: Show compiler
-        run: |
-          clang --version
-          ld.lld --version
-
-      - name: Build kernel
+      - name: Diagnose scripts mod
         working-directory: kernel
         run: |
-          export ARCH=arm64
-          export CROSS_COMPILE=aarch64-linux-gnu-
+          set -o pipefail
 
-          make -j2 \
-            O=out \
+          echo "========================================"
+          echo "DIAGNOSTIC: scripts/mod/empty.o"
+          echo "========================================"
+
+          echo "===== COMPILER ====="
+          clang --version
+
+          echo "===== KERNEL VERSION ====="
+          make O=out ARCH=arm64 kernelversion
+
+          echo "===== BUILD empty.o WITH VERBOSE OUTPUT ====="
+
+          make -C out \
             ARCH=arm64 \
+            V=1 \
             CC=clang \
             HOSTCC=clang \
             HOSTCXX=clang++ \
             HOSTLD=ld.lld \
-            Image.gz
+            scripts/mod/empty.o
 
-      - name: Collect output
+      - name: Stop after diagnostic
         run: |
-          mkdir -p output
-
-          if [ -f kernel/out/arch/arm64/boot/Image.gz ]; then
-            cp kernel/out/arch/arm64/boot/Image.gz output/
-          fi
-
-          cp kernel/out/.config output/kernel-config
-
-          ls -lah output
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: Redmi9A-KernelSU
-          path: output/
+          echo "Diagnostic completed."
+          echo "The actual compiler output is above."
+          echo "No kernel will be flashed by this workflow."
