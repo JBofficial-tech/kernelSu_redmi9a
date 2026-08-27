@@ -1,6 +1,7 @@
-name: Build KernelSU for Redmi 9A
+          path: KernelSU-Redmi9A-Flashable.zip
+name: Redmi 9A KernelSU Build
 
-on:
+'on':
   workflow_dispatch:
 
 jobs:
@@ -8,97 +9,166 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-      - name: Setup Build Dependencies & Python 2
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y bc bison build-essential ccache curl flex git gnupg gperf \
-            liblz4-tool libncurses-dev libncurses5 libssl-dev libxml2 libxml2-utils lzop \
-            pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev tar wget libelf-dev \
-            python2 python2-minimal device-tree-compiler cpio
-          sudo ln -sf /usr/bin/python2 /usr/bin/python
+          sudo apt-get install -y \
+            git bc bison flex build-essential \
+            clang lld llvm \
+            gcc-aarch64-linux-gnu \
+            binutils-aarch64-linux-gnu \
+            libssl-dev libelf-dev \
+            libncurses5-dev libncurses-dev \
+            python3 rsync cpio zip unzip \
+            wget curl device-tree-compiler
 
-      - name: Setup Proton Clang & GCC Toolchains
+      - name: Show toolchain
         run: |
-          git clone --depth=1 https://github.com/kdrag0n/proton-clang.git clang
-          git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9.git gcc64
-          git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9.git gcc32
+          echo "===== HOST CLANG ====="
+          clang --version
 
-      - name: Clone Kernel Source
+          echo "===== ARM64 GCC ====="
+          aarch64-linux-gnu-gcc --version | head -1
+
+          echo "===== LLD ====="
+          ld.lld --version
+
+      - name: Clone kernel source
         run: |
-          git clone --depth=1 https://github.com/zyexro/sashimi_kernel_xiaomi_blossom.git kernel
+          git clone --depth=1 \
+            https://github.com/zyexro/sashimi_kernel_xiaomi_blossom.git \
+            kernel
 
-      - name: Patch Python Shebangs
+      - name: Check source
         working-directory: kernel
         run: |
-          if [ -d "tools/dct" ]; then
-            find tools/dct -type f -name "*.py" -exec sed -i 's|#!/usr/bin/env python$|#!/usr/bin/env python2|g' {} +
-            find tools/dct -type f -name "*.py" -exec sed -i 's|#!/usr/bin/python$|#!/usr/bin/python2|g' {} +
+          echo "===== COMMIT ====="
+          git log -1 --oneline
+
+          echo "===== KERNEL VERSION ====="
+          make kernelversion
+
+      - name: Find defconfig
+        working-directory: kernel
+        run: |
+          echo "===== DEVICE CONFIGS ====="
+
+          find arch/arm64/configs \
+            -maxdepth 1 \
+            -type f \
+            \( \
+              -iname "*dandelion*" \
+              -o -iname "*blossom*" \
+              -o -iname "*angelican*" \
+              -o -iname "*mt6765*" \
+            \) \
+            -print
+
+      - name: Prepare config
+        working-directory: kernel
+        run: |
+          mkdir -p out
+
+          if [ -f arch/arm64/configs/dandelion_defconfig ]; then
+            echo "Using dandelion_defconfig"
+            make O=out ARCH=arm64 \
+              dandelion_defconfig
+
+          elif [ -f arch/arm64/configs/blossom_defconfig ]; then
+            echo "Using blossom_defconfig"
+            make O=out ARCH=arm64 \
+              blossom_defconfig
+
+          elif [ -f arch/arm64/configs/angelican_defconfig ]; then
+            echo "Using angelican_defconfig"
+            make O=out ARCH=arm64 \
+              angelican_defconfig
+
+          else
+            echo "ERROR: No suitable defconfig found"
+            exit 1
           fi
+
+      - name: Clone KernelSU Next
+        run: |
+          git clone --depth=1 \
+            https://github.com/KernelSU-Next/KernelSU-Next.git \
+            KernelSU-Next
 
       - name: Integrate KernelSU
         working-directory: kernel
         run: |
-          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s main
+          ../KernelSU-Next/kernel/setup.sh
 
-      - name: Compile Kernel
+      - name: Enable KernelSU
         working-directory: kernel
         run: |
-          export PATH="$(pwd)/../clang/bin:$(pwd)/../gcc64/bin:$(pwd)/../gcc32/bin:$PATH"
-          mkdir -p out
+          ./scripts/config \
+            --file out/.config \
+            --enable CONFIG_KSU
 
-          if [ -f arch/arm64/configs/dandelion_defconfig ]; then
-            DEFCONFIG=dandelion_defconfig
-          elif [ -f arch/arm64/configs/blossom_defconfig ]; then
-            DEFCONFIG=blossom_defconfig
-          elif [ -f arch/arm64/configs/angelican_defconfig ]; then
-            DEFCONFIG=angelican_defconfig
-          elif [ -f arch/arm64/configs/mt6765_defconfig ]; then
-            DEFCONFIG=mt6765_defconfig
-          else
-            DEFCONFIG=$(find arch/arm64/configs -name "*defconfig" -exec basename {} \; | head -n 1)
-          fi
-
-          echo "CONFIG_KSU=y" >> arch/arm64/configs/$DEFCONFIG
-          echo "CONFIG_KPROBES=y" >> arch/arm64/configs/$DEFCONFIG
-          echo "CONFIG_HAVE_KPROBES=y" >> arch/arm64/configs/$DEFCONFIG
-          echo "CONFIG_KPROBE_EVENTS=y" >> arch/arm64/configs/$DEFCONFIG
-
-          make O=out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-android- CROSS_COMPILE_ARM32=arm-linux-androideabi- $DEFCONFIG
-          make -j$(nproc --all) O=out ARCH=arm64 \
-            CC=clang \
+          make O=out ARCH=arm64 \
             CLANG_TRIPLE=aarch64-linux-gnu- \
-            CROSS_COMPILE=aarch64-linux-android- \
-            CROSS_COMPILE_ARM32=arm-linux-androideabi- \
-            KCFLAGS="-w"
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            olddefconfig
 
-      - name: Package AnyKernel3
+          echo "===== KSU ====="
+          grep CONFIG_KSU out/.config || true
+
+      - name: Build scripts
+        working-directory: kernel
         run: |
-          git clone https://github.com/osm0sis/AnyKernel3.git ak3
-          
-          if [ -f kernel/out/arch/arm64/boot/Image.gz-dtb ]; then
-            cp kernel/out/arch/arm64/boot/Image.gz-dtb ak3/Image.gz-dtb
-          elif [ -f kernel/out/arch/arm64/boot/Image.gz ]; then
-            cp kernel/out/arch/arm64/boot/Image.gz ak3/Image.gz
-          elif [ -f kernel/out/arch/arm64/boot/Image ]; then
-            cp kernel/out/arch/arm64/boot/Image ak3/Image
+          make -C out \
+            ARCH=arm64 \
+            SUBARCH=arm64 \
+            CC=clang \
+            REAL_CC=clang \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            HOSTCC=clang \
+            HOSTCXX=clang++ \
+            HOSTLD=ld.lld \
+            V=1 \
+            scripts
+
+      - name: Build kernel
+        working-directory: kernel
+        run: |
+          make \
+            -j2 \
+            O=out \
+            ARCH=arm64 \
+            SUBARCH=arm64 \
+            CC=clang \
+            REAL_CC=clang \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            HOSTCC=clang \
+            HOSTCXX=clang++ \
+            HOSTLD=ld.lld \
+            Image.gz
+
+      - name: Collect output
+        run: |
+          mkdir -p output
+
+          if [ -f kernel/out/arch/arm64/boot/Image.gz ]; then
+            cp kernel/out/arch/arm64/boot/Image.gz \
+              output/Image.gz
           fi
 
-          cd ak3
-          sed -i 's/kernel.string=.*/kernel.string=KernelSU for Redmi 9A by Tech Mind/g' anykernel.sh
-          sed -i 's/do.devicecheck=1/do.devicecheck=0/g' anykernel.sh
-          sed -i 's/do.modules=0/do.modules=0/g' anykernel.sh
-          sed -i 's/do.systemless=1/do.systemless=1/g' anykernel.sh
-          sed -i 's/do.cleanup=1/do.cleanup=1/g' anykernel.sh
-          sed -i 's/do.cleanuponabort=0/do.cleanuponabort=0/g' anykernel.sh
-          sed -i 's|^block=.*|block=/dev/block/mmcblk0p33;|g' anykernel.sh
-          sed -i 's|^is_slot_device=.*|is_slot_device=0;|g' anykernel.sh
-          sed -i 's|^ramdisk_compression=.*|ramdisk_compression=auto;|g' anykernel.sh
+          cp kernel/out/.config \
+            output/kernel-config
 
-          chmod -R 755 tools/ *.sh
-          zip -r9 ../KernelSU-Redmi9A-Flashable.zip ./* -x .git README.md
+          echo "===== BUILD OUTPUT ====="
+          ls -lah output
 
-      - name: Upload Flashable ZIP
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: KernelSU-Redmi9A-Flashable
-          path: KernelSU-Redmi9A-Flashable.zip
+          name: Redmi9A-KernelSU
+          path: output/
