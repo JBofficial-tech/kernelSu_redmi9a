@@ -8,195 +8,246 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install tools
+      - name: Install required tools
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            binwalk \
             file \
-            xz-utils \
-            gzip \
+            xxd \
             cpio \
+            gzip \
             lz4 \
             zstd \
             unzip \
-            python3 \
-            python3-pip
+            binwalk
 
-      - name: Check repository
+      - name: Download original boot.img
         run: |
-          echo "===== REPOSITORY FILES ====="
-          find . -maxdepth 3 -type f -printf '%p %s bytes\n' | sort
+          mkdir -p input
 
-      - name: Locate boot image
-        run: |
-          echo "===== SEARCHING FOR BOOT.IMG ====="
+          BOOT_URL="https://github.com/JBofficial-tech/kernelSu_redmi9a/releases/download/v1.0/boot.img"
 
-          BOOT=""
+          echo "===== DOWNLOADING BOOT.IMG ====="
+          echo "$BOOT_URL"
 
-          for f in \
-            ./boot.img \
-            ./files/boot.img \
-            ./images/boot.img \
-            ./input/boot.img
-          do
-            if [ -f "$f" ]; then
-              BOOT="$f"
-              break
-            fi
-          done
+          curl -L --fail --retry 3 \
+            "$BOOT_URL" \
+            -o input/boot.img
 
-          if [ -z "$BOOT" ]; then
-            echo "ERROR: boot.img is not present in GitHub repository."
-            echo
-            echo "IMPORTANT:"
-            echo "GitHub repository does not automatically receive files"
-            echo "uploaded to this ChatGPT conversation."
-            echo
-            echo "Put your boot.img in the repository or use Git LFS."
-            exit 1
-          fi
-
-          echo "BOOT_IMAGE=$BOOT" >> "$GITHUB_ENV"
-          echo "Found: $BOOT"
+          echo
+          echo "===== DOWNLOADED FILE ====="
+          ls -lh input/boot.img
+          file input/boot.img
 
       - name: Verify boot image
         run: |
-          echo "===== BOOT IMAGE ====="
-          file "$BOOT_IMAGE"
+          echo "===== BOOT IMAGE HEADER ====="
+
+          xxd -l 64 input/boot.img
 
           echo
-          echo "===== SIZE ====="
-          ls -lh "$BOOT_IMAGE"
+          echo "===== FILE TYPE ====="
+          file input/boot.img
 
           echo
-          echo "===== HEADER ====="
-          xxd -l 64 "$BOOT_IMAGE"
+          echo "===== SHA256 ====="
+          sha256sum input/boot.img
 
-      - name: Extract Android boot image
+      - name: Parse Android boot image
         run: |
           mkdir -p extracted
 
           python3 - <<'PY'
           import struct
+          import os
 
-          boot = open("$BOOT_IMAGE", "rb").read()
+          path = "input/boot.img"
+
+          with open(path, "rb") as f:
+              boot = f.read()
 
           if boot[:8] != b"ANDROID!":
-              raise SystemExit("ERROR: Invalid Android boot image")
+              raise SystemExit("ERROR: ANDROID! header not found")
 
-          print("ANDROID boot header: OK")
+          print("ANDROID boot image: VALID")
 
-          kernel_size, kernel_addr = struct.unpack_from("<II", boot, 8)
-          ramdisk_size, ramdisk_addr = struct.unpack_from("<II", boot, 16)
-          second_size, second_addr = struct.unpack_from("<II", boot, 24)
-          tags_addr, page_size = struct.unpack_from("<II", boot, 32)
+          kernel_size = struct.unpack_from("<I", boot, 8)[0]
+          kernel_addr = struct.unpack_from("<I", boot, 12)[0]
+          ramdisk_size = struct.unpack_from("<I", boot, 16)[0]
+          ramdisk_addr = struct.unpack_from("<I", boot, 20)[0]
+          second_size = struct.unpack_from("<I", boot, 24)[0]
+          second_addr = struct.unpack_from("<I", boot, 28)[0]
+          tags_addr = struct.unpack_from("<I", boot, 32)[0]
+          page_size = struct.unpack_from("<I", boot, 36)[0]
 
           print("Kernel size :", kernel_size)
+          print("Kernel addr :", hex(kernel_addr))
           print("Ramdisk size:", ramdisk_size)
+          print("Ramdisk addr:", hex(ramdisk_addr))
           print("Second size :", second_size)
           print("Page size   :", page_size)
 
-          def align(x, p):
-              return ((x + p - 1) // p) * p
+          def align(value, alignment):
+              return ((value + alignment - 1) // alignment) * alignment
 
-          offset = page_size
+          kernel_offset = page_size
+          ramdisk_offset = kernel_offset + align(kernel_size, page_size)
 
-          kernel = boot[offset:offset + kernel_size]
-          offset += align(kernel_size, page_size)
+          kernel = boot[
+              kernel_offset:
+              kernel_offset + kernel_size
+          ]
 
-          ramdisk = boot[offset:offset + ramdisk_size]
+          ramdisk = boot[
+              ramdisk_offset:
+              ramdisk_offset + ramdisk_size
+          ]
 
-          open("extracted/kernel.bin", "wb").write(kernel)
-          open("extracted/ramdisk.bin", "wb").write(ramdisk)
+          with open("extracted/kernel.bin", "wb") as f:
+              f.write(kernel)
 
-          print("Kernel extracted:", len(kernel))
-          print("Ramdisk extracted:", len(ramdisk))
+          with open("extracted/ramdisk.bin", "wb") as f:
+              f.write(ramdisk)
+
+          print()
+          print("Kernel extracted:", len(kernel), "bytes")
+          print("Ramdisk extracted:", len(ramdisk), "bytes")
+          print("Kernel offset:", kernel_offset)
+          print("Ramdisk offset:", ramdisk_offset)
           PY
 
       - name: Inspect kernel
         run: |
-          echo "===== KERNEL FILE ====="
+          echo "===== KERNEL ====="
           file extracted/kernel.bin
+          ls -lh extracted/kernel.bin
+
+          echo
+          echo "===== KERNEL MAGIC ====="
+          xxd -l 32 extracted/kernel.bin
 
           echo
           echo "===== KERNEL STRINGS ====="
 
-          strings -a extracted/kernel.bin > extracted/kernel.strings
+          strings -a extracted/kernel.bin \
+            > extracted/kernel.strings
+
+          echo
+          echo "===== VERSION / DEVICE / COMPILER ====="
 
           grep -Ei \
-            'Linux version|4\.19|4\.9|clang|gcc|dandelion|blossom|angelica|redmi' \
+            'Linux version|4\.19|4\.9|clang|gcc|dandelion|angelica|blossom|redmi|xiaomi|perf' \
             extracted/kernel.strings \
-            | head -100 || true
+            | head -200 || true
 
-      - name: Search kernel config
+      - name: Search embedded kernel config
         run: |
-          echo "===== CONFIG SEARCH ====="
+          echo "===== EMBEDDED CONFIG ====="
 
-          strings -a extracted/kernel.bin \
-            | grep -E \
-              'CONFIG_[A-Z0-9_]+=|IKCONFIG|KSU|KERNELSU' \
-            | head -200 \
+          grep -Ei \
+            'IKCONFIG|CONFIG_[A-Z0-9_]+=|KSU|KERNELSU' \
+            extracted/kernel.strings \
+            | head -300 \
             > extracted/config-results.txt || true
 
           cat extracted/config-results.txt
 
-      - name: Kernel compression detection
+      - name: Inspect ramdisk
         run: |
-          echo "===== COMPRESSION / FORMAT ====="
-
-          file extracted/kernel.bin
+          echo "===== RAMDISK ====="
+          file extracted/ramdisk.bin
+          ls -lh extracted/ramdisk.bin
 
           echo
-          echo "Magic bytes:"
-          xxd -l 32 extracted/kernel.bin
+          echo "===== RAMDISK MAGIC ====="
+          xxd -l 16 extracted/ramdisk.bin
 
-      - name: Hash kernel
+      - name: Extract ramdisk when possible
         run: |
-          echo "===== HASHES ====="
+          mkdir -p extracted/ramdisk
 
-          sha256sum extracted/kernel.bin
-          sha256sum "$BOOT_IMAGE"
+          if file extracted/ramdisk.bin | grep -qi 'gzip compressed'; then
+            echo "gzip ramdisk detected"
+            gzip -dc extracted/ramdisk.bin \
+              | (cd extracted/ramdisk && cpio -idm --no-absolute-filenames) \
+              || true
 
-      - name: Create report
+          elif file extracted/ramdisk.bin | grep -qi 'ASCII cpio'; then
+            echo "cpio ramdisk detected"
+            (cd extracted/ramdisk && cpio -idm --no-absolute-filenames) \
+              < extracted/ramdisk.bin \
+              || true
+
+          elif file extracted/ramdisk.bin | grep -qi 'LZ4'; then
+            echo "LZ4 ramdisk detected"
+            lz4 -dc extracted/ramdisk.bin \
+              | (cd extracted/ramdisk && cpio -idm --no-absolute-filenames) \
+              || true
+
+          elif file extracted/ramdisk.bin | grep -qi 'Zstandard'; then
+            echo "ZSTD ramdisk detected"
+            zstd -dc extracted/ramdisk.bin \
+              | (cd extracted/ramdisk && cpio -idm --no-absolute-filenames) \
+              || true
+
+          else
+            echo "Unknown ramdisk format"
+          fi
+
+          echo
+          echo "===== RAMDISK FILES ====="
+          find extracted/ramdisk -maxdepth 3 -type f \
+            | sort \
+            | head -200 || true
+
+      - name: Create final report
         run: |
           {
-            echo "===== ORIGINAL BOOT INSPECTION ====="
+            echo "======================================"
+            echo " REDMI 9A ORIGINAL BOOT INSPECTION"
+            echo "======================================"
             echo
-            echo "Boot image:"
-            file "$BOOT_IMAGE"
-            ls -lh "$BOOT_IMAGE"
+
+            echo "BOOT IMAGE:"
+            file input/boot.img
+            ls -lh input/boot.img
 
             echo
-            echo "Kernel:"
+            echo "BOOT SHA256:"
+            sha256sum input/boot.img
+
+            echo
+            echo "KERNEL:"
             file extracted/kernel.bin
             ls -lh extracted/kernel.bin
 
             echo
-            echo "===== KERNEL VERSION / BUILD ====="
-            grep -Ei \
-              'Linux version|4\.19|4\.9|clang|gcc|dandelion|blossom|angelica|redmi' \
-              extracted/kernel.strings \
-              | head -100 || true
-
-            echo
-            echo "===== KERNELSU / CONFIG ====="
-            cat extracted/config-results.txt
-
-            echo
-            echo "===== HASH ====="
+            echo "KERNEL SHA256:"
             sha256sum extracted/kernel.bin
-            sha256sum "$BOOT_IMAGE"
+
+            echo
+            echo "VERSION / DEVICE / COMPILER:"
+            grep -Ei \
+              'Linux version|4\.19|4\.9|clang|gcc|dandelion|angelica|blossom|redmi|xiaomi|perf' \
+              extracted/kernel.strings \
+              | head -200 || true
+
+            echo
+            echo "KERNEL CONFIG / KERNELSU:"
+            cat extracted/config-results.txt
 
           } > extracted/REPORT.txt
 
+          echo
+          echo "======================================"
           cat extracted/REPORT.txt
+          echo "======================================"
 
-      - name: Upload inspection report
+      - name: Upload inspection results
         uses: actions/upload-artifact@v4
         with:
-          name: Redmi9A-boot-inspection
+          name: Redmi9A-Boot-Inspection
           path: extracted/
