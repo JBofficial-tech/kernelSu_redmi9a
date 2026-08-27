@@ -1,10 +1,10 @@
-name: Redmi 9A KernelSU Build
+name: Redmi 9A 4.19 KernelSU Check
 
 'on':
   workflow_dispatch:
 
 jobs:
-  build:
+  verify:
     runs-on: ubuntu-22.04
 
     steps:
@@ -12,162 +12,118 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install dependencies
+      - name: Install tools
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             git bc bison flex build-essential \
-            clang lld llvm \
+            clang-11 lld-11 llvm-11 \
             gcc-aarch64-linux-gnu \
             binutils-aarch64-linux-gnu \
             libssl-dev libelf-dev \
             libncurses5-dev libncurses-dev \
-            python3 rsync cpio zip unzip \
-            wget curl device-tree-compiler
+            python3 rsync cpio unzip zip \
+            wget curl xz-utils
 
-      - name: Show toolchain
+      - name: Show compiler
         run: |
-          echo "===== HOST CLANG ====="
-          clang --version
-
-          echo "===== ARM64 GCC ====="
+          clang-11 --version
+          ld.lld-11 --version
           aarch64-linux-gnu-gcc --version | head -1
 
-          echo "===== LLD ====="
-          ld.lld --version
-
-      - name: Clone kernel source
+      - name: Clone candidate kernel tree
         run: |
           git clone --depth=1 \
-            https://github.com/zyexro/sashimi_kernel_xiaomi_blossom.git \
+            https://github.com/droidian-mt6765/kernel-xiaomi-mt6765.git \
             kernel
 
-      - name: Check source
+      - name: Inspect kernel tree
         working-directory: kernel
         run: |
           echo "===== COMMIT ====="
           git log -1 --oneline
 
           echo "===== KERNEL VERSION ====="
-          make kernelversion
+          make kernelversion || true
 
-      - name: Find defconfig
-        working-directory: kernel
-        run: |
-          echo "===== DEVICE CONFIGS ====="
+          echo "===== MAKEFILE VERSION ====="
+          grep -m1 -E '^VERSION|^PATCHLEVEL|^SUBLEVEL|^EXTRAVERSION' Makefile || true
 
+          echo "===== ARM64 CONFIGS ====="
           find arch/arm64/configs \
             -maxdepth 1 \
             -type f \
-            \( \
-              -iname "*dandelion*" \
-              -o -iname "*blossom*" \
-              -o -iname "*angelican*" \
-              -o -iname "*mt6765*" \
-            \) \
-            -print
+            -print | head -100
 
-      - name: Prepare config
+      - name: Find Redmi 9A configs
         working-directory: kernel
         run: |
-          mkdir -p out
+          echo "===== DANDELION/BLOSSOM CONFIG SEARCH ====="
 
-          if [ -f arch/arm64/configs/dandelion_defconfig ]; then
-            echo "Using dandelion_defconfig"
-            make O=out ARCH=arm64 \
-              dandelion_defconfig
+          grep -RilE \
+            'dandelion|blossom|mt6765' \
+            arch/arm64/configs \
+            2>/dev/null || true
 
-          elif [ -f arch/arm64/configs/blossom_defconfig ]; then
-            echo "Using blossom_defconfig"
-            make O=out ARCH=arm64 \
-              blossom_defconfig
-
-          elif [ -f arch/arm64/configs/angelican_defconfig ]; then
-            echo "Using angelican_defconfig"
-            make O=out ARCH=arm64 \
-              angelican_defconfig
-
-          else
-            echo "ERROR: No suitable defconfig found"
-            exit 1
-          fi
-
-      - name: Clone KernelSU Next
+      - name: Check KernelSU compatibility
         run: |
           git clone --depth=1 \
             https://github.com/KernelSU-Next/KernelSU-Next.git \
             KernelSU-Next
 
-      - name: Integrate KernelSU
+          echo "===== KERNELSU VERSION ====="
+          cd KernelSU-Next
+          git describe --tags --always || true
+
+      - name: Check source compatibility
         working-directory: kernel
         run: |
-          ../KernelSU-Next/kernel/setup.sh
+          echo "===== FINAL SOURCE REPORT ====="
 
-      - name: Enable KernelSU
-        working-directory: kernel
-        run: |
-          ./scripts/config \
-            --file out/.config \
-            --enable CONFIG_KSU
+          echo "Kernel version:"
+          make kernelversion || true
 
-          make O=out ARCH=arm64 \
-            CLANG_TRIPLE=aarch64-linux-gnu- \
-            CROSS_COMPILE=aarch64-linux-gnu- \
-            olddefconfig
+          echo
+          echo "Git commit:"
+          git rev-parse HEAD
 
-          echo "===== KSU ====="
-          grep CONFIG_KSU out/.config || true
+          echo
+          echo "Architecture:"
+          grep -E '^CONFIG_ARM64=' \
+            arch/arm64/configs/* 2>/dev/null | head -20 || true
 
-      - name: Build scripts
-        working-directory: kernel
-        run: |
-          make -C out \
-            ARCH=arm64 \
-            SUBARCH=arm64 \
-            CC=clang \
-            REAL_CC=clang \
-            CLANG_TRIPLE=aarch64-linux-gnu- \
-            CROSS_COMPILE=aarch64-linux-gnu- \
-            HOSTCC=clang \
-            HOSTCXX=clang++ \
-            HOSTLD=ld.lld \
-            V=1 \
-            scripts
-
-      - name: Build kernel
-        working-directory: kernel
-        run: |
-          make \
-            -j2 \
-            O=out \
-            ARCH=arm64 \
-            SUBARCH=arm64 \
-            CC=clang \
-            REAL_CC=clang \
-            CLANG_TRIPLE=aarch64-linux-gnu- \
-            CROSS_COMPILE=aarch64-linux-gnu- \
-            HOSTCC=clang \
-            HOSTCXX=clang++ \
-            HOSTLD=ld.lld \
-            Image.gz
-
-      - name: Collect output
-        run: |
-          mkdir -p output
-
-          if [ -f kernel/out/arch/arm64/boot/Image.gz ]; then
-            cp kernel/out/arch/arm64/boot/Image.gz \
-              output/Image.gz
+          echo
+          echo "KernelSU driver compatibility:"
+          if [ -d ../KernelSU-Next/kernel ]; then
+            echo "KernelSU-Next driver available"
+          else
+            echo "KernelSU-Next driver NOT found"
           fi
 
-          cp kernel/out/.config \
-            output/kernel-config
+      - name: Upload source report
+        run: |
+          mkdir -p report
 
-          echo "===== BUILD OUTPUT ====="
-          ls -lah output
+          cd kernel
 
-      - name: Upload artifact
+          {
+            echo "===== GIT ====="
+            git log -1 --oneline
+
+            echo
+            echo "===== KERNEL VERSION ====="
+            make kernelversion || true
+
+            echo
+            echo "===== CONFIGS ====="
+            find arch/arm64/configs \
+              -maxdepth 1 \
+              -type f \
+              -print
+          } > ../report/source-report.txt
+
+      - name: Upload report
         uses: actions/upload-artifact@v4
         with:
-          name: Redmi9A-KernelSU
-          path: output/
+          name: Redmi9A-source-report
+          path: report/source-report.txt
