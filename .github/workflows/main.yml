@@ -1,10 +1,10 @@
-name: Redmi 9A - Niigo Kernel Compatibility Test
+name: Redmi 9A - KernelSU Build
 
 on:
   workflow_dispatch:
 
 jobs:
-  verify-build:
+  build:
     runs-on: ubuntu-22.04
 
     steps:
@@ -23,7 +23,7 @@ jobs:
             python3 rsync cpio \
             device-tree-compiler
 
-      - name: Clone Niigo kernel
+      - name: Clone verified Niigo kernel
         run: |
           git clone --depth=1 \
             https://github.com/TelegramAt25/niigo_kernel_xiaomi_blossom.git \
@@ -37,34 +37,22 @@ jobs:
           test -d drivers
           test -d include
 
-          echo "Kernel source tree: OK"
-
-          echo
-          echo "===== VERSION ====="
+          echo "===== KERNEL VERSION ====="
           make kernelversion
 
-          echo
-          echo "===== HEAD ====="
+          echo "===== SOURCE COMMIT ====="
           git log -1 --oneline
 
-      - name: Check ARM64 configuration
+      - name: Find device config
         working-directory: kernel
         run: |
-          echo "===== CONFIG FILES ====="
+          echo "===== AVAILABLE CONFIGS ====="
 
           find arch/arm64/configs \
             -type f \
             | grep -Ei 'blossom|dandelion|mt6765' \
-            | head -50 || true
+            | head -50
 
-      - name: Prepare output
-        working-directory: kernel
-        run: |
-          mkdir -p out
-
-      - name: Detect suitable defconfig
-        working-directory: kernel
-        run: |
           CONFIG=""
 
           for cfg in \
@@ -79,40 +67,91 @@ jobs:
           done
 
           if [ -z "$CONFIG" ]; then
-            echo "No obvious Blossom/MT6765 defconfig found."
-            echo "Available configs:"
-            find arch/arm64/configs -maxdepth 1 -type f | head -100
+            echo "ERROR: Redmi 9A/Blossom defconfig not found."
             exit 1
           fi
 
-          echo "Using config: $CONFIG"
+          echo "Using: $CONFIG"
           echo "KERNEL_CONFIG=$CONFIG" >> "$GITHUB_ENV"
 
       - name: Configure kernel
         working-directory: kernel
         run: |
+          mkdir -p out
+
           make \
             O=out \
             ARCH=arm64 \
             "$KERNEL_CONFIG"
 
-      - name: Verify original kernel requirements
+      - name: Integrate KernelSU
         working-directory: kernel
         run: |
-          echo "===== REQUIRED CONFIG ====="
+          echo "===== INSTALLING KERNELSU ====="
 
-          for option in \
-            CONFIG_ARM64 \
-            CONFIG_MODULES \
-            CONFIG_MODVERSIONS \
-            CONFIG_KPROBES \
-            CONFIG_KALLSYMS \
-            CONFIG_FTRACE
-          do
-            grep "^$option=" out/.config || true
-          done
+          curl -LSs \
+            https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh \
+            | bash -
 
-      - name: Build test
+          echo
+          echo "===== KERNELSU FILES ====="
+
+          test -d drivers/kernelsu || \
+            test -d drivers/ksu || \
+            {
+              echo "ERROR: KernelSU integration directory not found."
+              exit 1
+            }
+
+      - name: Enable KernelSU configuration
+        working-directory: kernel
+        run: |
+          echo "===== CONFIGURING KERNELSU ====="
+
+          if [ ! -f scripts/config ]; then
+            echo "ERROR: scripts/config not found."
+            exit 1
+          fi
+
+          ./scripts/config \
+            --file out/.config \
+            --enable CONFIG_KSU
+
+          ./scripts/config \
+            --file out/.config \
+            --enable CONFIG_KPROBES
+
+          ./scripts/config \
+            --file out/.config \
+            --enable CONFIG_KPROBE_EVENTS
+
+          ./scripts/config \
+            --file out/.config \
+            --enable CONFIG_KALLSYMS
+
+          make \
+            O=out \
+            ARCH=arm64 \
+            olddefconfig
+
+      - name: Verify KernelSU configuration
+        working-directory: kernel
+        run: |
+          echo "===== KSU CONFIG ====="
+
+          grep '^CONFIG_KSU=' out/.config || {
+            echo "ERROR: CONFIG_KSU is not enabled."
+            exit 1
+          }
+
+          grep '^CONFIG_KPROBES=' out/.config || true
+          grep '^CONFIG_KPROBE_EVENTS=' out/.config || true
+          grep '^CONFIG_KALLSYMS=' out/.config || true
+
+          echo
+          echo "KernelSU configuration verified."
+
+      - name: Build Kernel
         working-directory: kernel
         run: |
           export ARCH=arm64
@@ -130,20 +169,53 @@ jobs:
             CROSS_COMPILE=aarch64-linux-gnu- \
             Image.gz
 
-      - name: Verify kernel output
+      - name: Verify final kernel
         working-directory: kernel
         run: |
+          echo "===== FINAL KERNEL ====="
+
           test -f out/arch/arm64/boot/Image.gz
 
-          echo "===== BUILD SUCCESS ====="
           ls -lh out/arch/arm64/boot/Image.gz
 
           echo
           echo "===== KERNEL VERSION ====="
           make O=out ARCH=arm64 kernelversion
 
-      - name: Upload test kernel
+          echo
+          echo "===== KSU CONFIG ====="
+          grep '^CONFIG_KSU=' out/.config
+
+          echo
+          echo "===== KSU STRINGS ====="
+          strings out/arch/arm64/boot/Image.gz \
+            | grep -i 'kernelsu\|kernelsu' \
+            | head -20 || true
+
+      - name: Prepare artifact
+        run: |
+          mkdir -p output
+
+          cp \
+            kernel/out/arch/arm64/boot/Image.gz \
+            output/Image.gz
+
+          cp \
+            kernel/out/.config \
+            output/kernel-config
+
+          cp \
+            kernel/Makefile \
+            output/kernel-Makefile
+
+          echo "KernelSU build completed." \
+            > output/BUILD_SUCCESS.txt
+
+          echo "===== OUTPUT ====="
+          ls -lh output
+
+      - name: Upload KernelSU kernel
         uses: actions/upload-artifact@v4
         with:
-          name: Redmi9A-Niigo-Compatibility-Test
-          path: kernel/out/arch/arm64/boot/Image.gz
+          name: Redmi9A-KernelSU
+          path: output/
