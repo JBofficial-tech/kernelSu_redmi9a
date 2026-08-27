@@ -1,253 +1,149 @@
-name: Redmi 9A - Inspect Original Boot
+name: Redmi 9A - Niigo Kernel Compatibility Test
 
 on:
   workflow_dispatch:
 
 jobs:
-  inspect:
+  verify-build:
     runs-on: ubuntu-22.04
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install required tools
+      - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            file \
-            xxd \
-            cpio \
-            gzip \
-            lz4 \
-            zstd \
-            unzip \
-            binwalk
+            git bc bison flex build-essential \
+            clang llvm lld \
+            gcc-aarch64-linux-gnu \
+            binutils-aarch64-linux-gnu \
+            libssl-dev libelf-dev \
+            python3 rsync cpio \
+            device-tree-compiler
 
-      - name: Download original boot.img
+      - name: Clone Niigo kernel
         run: |
-          mkdir -p input
+          git clone --depth=1 \
+            https://github.com/TelegramAt25/niigo_kernel_xiaomi_blossom.git \
+            kernel
 
-          BOOT_URL="https://github.com/JBofficial-tech/kernelSu_redmi9a/releases/download/v1.0/boot.img"
+      - name: Verify kernel tree
+        working-directory: kernel
+        run: |
+          test -f Makefile
+          test -d arch
+          test -d drivers
+          test -d include
 
-          echo "===== DOWNLOADING BOOT.IMG ====="
-          echo "$BOOT_URL"
-
-          curl -L --fail --retry 3 \
-            "$BOOT_URL" \
-            -o input/boot.img
+          echo "Kernel source tree: OK"
 
           echo
-          echo "===== DOWNLOADED FILE ====="
-          ls -lh input/boot.img
-          file input/boot.img
-
-      - name: Verify boot image
-        run: |
-          echo "===== BOOT IMAGE HEADER ====="
-
-          xxd -l 64 input/boot.img
+          echo "===== VERSION ====="
+          make kernelversion
 
           echo
-          echo "===== FILE TYPE ====="
-          file input/boot.img
+          echo "===== HEAD ====="
+          git log -1 --oneline
 
-          echo
-          echo "===== SHA256 ====="
-          sha256sum input/boot.img
-
-      - name: Parse Android boot image
+      - name: Check ARM64 configuration
+        working-directory: kernel
         run: |
-          mkdir -p extracted
+          echo "===== CONFIG FILES ====="
 
-          python3 - <<'PY'
-          import struct
-          import os
+          find arch/arm64/configs \
+            -type f \
+            | grep -Ei 'blossom|dandelion|mt6765' \
+            | head -50 || true
 
-          path = "input/boot.img"
-
-          with open(path, "rb") as f:
-              boot = f.read()
-
-          if boot[:8] != b"ANDROID!":
-              raise SystemExit("ERROR: ANDROID! header not found")
-
-          print("ANDROID boot image: VALID")
-
-          kernel_size = struct.unpack_from("<I", boot, 8)[0]
-          kernel_addr = struct.unpack_from("<I", boot, 12)[0]
-          ramdisk_size = struct.unpack_from("<I", boot, 16)[0]
-          ramdisk_addr = struct.unpack_from("<I", boot, 20)[0]
-          second_size = struct.unpack_from("<I", boot, 24)[0]
-          second_addr = struct.unpack_from("<I", boot, 28)[0]
-          tags_addr = struct.unpack_from("<I", boot, 32)[0]
-          page_size = struct.unpack_from("<I", boot, 36)[0]
-
-          print("Kernel size :", kernel_size)
-          print("Kernel addr :", hex(kernel_addr))
-          print("Ramdisk size:", ramdisk_size)
-          print("Ramdisk addr:", hex(ramdisk_addr))
-          print("Second size :", second_size)
-          print("Page size   :", page_size)
-
-          def align(value, alignment):
-              return ((value + alignment - 1) // alignment) * alignment
-
-          kernel_offset = page_size
-          ramdisk_offset = kernel_offset + align(kernel_size, page_size)
-
-          kernel = boot[
-              kernel_offset:
-              kernel_offset + kernel_size
-          ]
-
-          ramdisk = boot[
-              ramdisk_offset:
-              ramdisk_offset + ramdisk_size
-          ]
-
-          with open("extracted/kernel.bin", "wb") as f:
-              f.write(kernel)
-
-          with open("extracted/ramdisk.bin", "wb") as f:
-              f.write(ramdisk)
-
-          print()
-          print("Kernel extracted:", len(kernel), "bytes")
-          print("Ramdisk extracted:", len(ramdisk), "bytes")
-          print("Kernel offset:", kernel_offset)
-          print("Ramdisk offset:", ramdisk_offset)
-          PY
-
-      - name: Inspect kernel
+      - name: Prepare output
+        working-directory: kernel
         run: |
-          echo "===== KERNEL ====="
-          file extracted/kernel.bin
-          ls -lh extracted/kernel.bin
+          mkdir -p out
 
-          echo
-          echo "===== KERNEL MAGIC ====="
-          xxd -l 32 extracted/kernel.bin
-
-          echo
-          echo "===== KERNEL STRINGS ====="
-
-          strings -a extracted/kernel.bin \
-            > extracted/kernel.strings
-
-          echo
-          echo "===== VERSION / DEVICE / COMPILER ====="
-
-          grep -Ei \
-            'Linux version|4\.19|4\.9|clang|gcc|dandelion|angelica|blossom|redmi|xiaomi|perf' \
-            extracted/kernel.strings \
-            | head -200 || true
-
-      - name: Search embedded kernel config
+      - name: Detect suitable defconfig
+        working-directory: kernel
         run: |
-          echo "===== EMBEDDED CONFIG ====="
+          CONFIG=""
 
-          grep -Ei \
-            'IKCONFIG|CONFIG_[A-Z0-9_]+=|KSU|KERNELSU' \
-            extracted/kernel.strings \
-            | head -300 \
-            > extracted/config-results.txt || true
+          for cfg in \
+            blossom_defconfig \
+            dandelion_defconfig \
+            mt6765_defconfig
+          do
+            if [ -f "arch/arm64/configs/$cfg" ]; then
+              CONFIG="$cfg"
+              break
+            fi
+          done
 
-          cat extracted/config-results.txt
-
-      - name: Inspect ramdisk
-        run: |
-          echo "===== RAMDISK ====="
-          file extracted/ramdisk.bin
-          ls -lh extracted/ramdisk.bin
-
-          echo
-          echo "===== RAMDISK MAGIC ====="
-          xxd -l 16 extracted/ramdisk.bin
-
-      - name: Extract ramdisk when possible
-        run: |
-          mkdir -p extracted/ramdisk
-
-          if file extracted/ramdisk.bin | grep -qi 'gzip compressed'; then
-            echo "gzip ramdisk detected"
-            gzip -dc extracted/ramdisk.bin \
-              | (cd extracted/ramdisk && cpio -idm --no-absolute-filenames) \
-              || true
-
-          elif file extracted/ramdisk.bin | grep -qi 'ASCII cpio'; then
-            echo "cpio ramdisk detected"
-            (cd extracted/ramdisk && cpio -idm --no-absolute-filenames) \
-              < extracted/ramdisk.bin \
-              || true
-
-          elif file extracted/ramdisk.bin | grep -qi 'LZ4'; then
-            echo "LZ4 ramdisk detected"
-            lz4 -dc extracted/ramdisk.bin \
-              | (cd extracted/ramdisk && cpio -idm --no-absolute-filenames) \
-              || true
-
-          elif file extracted/ramdisk.bin | grep -qi 'Zstandard'; then
-            echo "ZSTD ramdisk detected"
-            zstd -dc extracted/ramdisk.bin \
-              | (cd extracted/ramdisk && cpio -idm --no-absolute-filenames) \
-              || true
-
-          else
-            echo "Unknown ramdisk format"
+          if [ -z "$CONFIG" ]; then
+            echo "No obvious Blossom/MT6765 defconfig found."
+            echo "Available configs:"
+            find arch/arm64/configs -maxdepth 1 -type f | head -100
+            exit 1
           fi
 
-          echo
-          echo "===== RAMDISK FILES ====="
-          find extracted/ramdisk -maxdepth 3 -type f \
-            | sort \
-            | head -200 || true
+          echo "Using config: $CONFIG"
+          echo "KERNEL_CONFIG=$CONFIG" >> "$GITHUB_ENV"
 
-      - name: Create final report
+      - name: Configure kernel
+        working-directory: kernel
         run: |
-          {
-            echo "======================================"
-            echo " REDMI 9A ORIGINAL BOOT INSPECTION"
-            echo "======================================"
-            echo
+          make \
+            O=out \
+            ARCH=arm64 \
+            "$KERNEL_CONFIG"
 
-            echo "BOOT IMAGE:"
-            file input/boot.img
-            ls -lh input/boot.img
+      - name: Verify original kernel requirements
+        working-directory: kernel
+        run: |
+          echo "===== REQUIRED CONFIG ====="
 
-            echo
-            echo "BOOT SHA256:"
-            sha256sum input/boot.img
+          for option in \
+            CONFIG_ARM64 \
+            CONFIG_MODULES \
+            CONFIG_MODVERSIONS \
+            CONFIG_KPROBES \
+            CONFIG_KALLSYMS \
+            CONFIG_FTRACE
+          do
+            grep "^$option=" out/.config || true
+          done
 
-            echo
-            echo "KERNEL:"
-            file extracted/kernel.bin
-            ls -lh extracted/kernel.bin
+      - name: Build test
+        working-directory: kernel
+        run: |
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
 
-            echo
-            echo "KERNEL SHA256:"
-            sha256sum extracted/kernel.bin
+          make \
+            -j2 \
+            O=out \
+            ARCH=arm64 \
+            CC=clang \
+            HOSTCC=clang \
+            HOSTCXX=clang++ \
+            HOSTLD=ld.lld \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            Image.gz
 
-            echo
-            echo "VERSION / DEVICE / COMPILER:"
-            grep -Ei \
-              'Linux version|4\.19|4\.9|clang|gcc|dandelion|angelica|blossom|redmi|xiaomi|perf' \
-              extracted/kernel.strings \
-              | head -200 || true
+      - name: Verify kernel output
+        working-directory: kernel
+        run: |
+          test -f out/arch/arm64/boot/Image.gz
 
-            echo
-            echo "KERNEL CONFIG / KERNELSU:"
-            cat extracted/config-results.txt
-
-          } > extracted/REPORT.txt
+          echo "===== BUILD SUCCESS ====="
+          ls -lh out/arch/arm64/boot/Image.gz
 
           echo
-          echo "======================================"
-          cat extracted/REPORT.txt
-          echo "======================================"
+          echo "===== KERNEL VERSION ====="
+          make O=out ARCH=arm64 kernelversion
 
-      - name: Upload inspection results
+      - name: Upload test kernel
         uses: actions/upload-artifact@v4
         with:
-          name: Redmi9A-Boot-Inspection
-          path: extracted/
+          name: Redmi9A-Niigo-Compatibility-Test
+          path: kernel/out/arch/arm64/boot/Image.gz
