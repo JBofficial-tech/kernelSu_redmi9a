@@ -1,13 +1,14 @@
-name: Redmi9A KPROBES Diagnostic
+name: Redmi 9A - KernelSU v0.9.5 Final
 
 on:
   workflow_dispatch:
 
 jobs:
-  diagnose:
+  build:
     runs-on: ubuntu-22.04
 
     steps:
+
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -15,21 +16,39 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            git bc bison flex build-essential \
+            git curl jq bc bison flex build-essential \
             clang llvm lld \
             gcc-aarch64-linux-gnu \
+            binutils-aarch64-linux-gnu \
             libssl-dev libelf-dev \
-            python3 rsync cpio
+            python3 rsync cpio \
+            device-tree-compiler unzip gzip
 
-      - name: Clone kernel
+      - name: Clone kernel source
         run: |
           git clone --depth=1 \
             https://github.com/TelegramAt25/niigo_kernel_xiaomi_blossom.git \
             kernel
 
-      - name: Find defconfig
+      - name: Verify kernel source
         working-directory: kernel
         run: |
+          test -f Makefile
+          test -d arch
+          test -d drivers
+
+          echo "===== KERNEL VERSION ====="
+          make kernelversion
+
+          echo
+          echo "===== COMMIT ====="
+          git log -1 --oneline
+
+      - name: Find Redmi 9A defconfig
+        working-directory: kernel
+        run: |
+          echo "===== DEFCONFIG SEARCH ====="
+
           find arch/arm64/configs \
             -type f \
             | grep -Ei 'blossom|dandelion|mt6765' \
@@ -48,11 +67,15 @@ jobs:
             fi
           done
 
-          test -n "$CONFIG"
+          if [ -z "$CONFIG" ]; then
+            echo "ERROR: Redmi 9A defconfig not found."
+            exit 1
+          fi
 
-          echo "CONFIG=$CONFIG" >> "$GITHUB_ENV"
+          echo "Using defconfig: $CONFIG"
+          echo "KERNEL_CONFIG=$CONFIG" >> "$GITHUB_ENV"
 
-      - name: Generate config
+      - name: Generate kernel config
         working-directory: kernel
         run: |
           mkdir -p out
@@ -60,95 +83,426 @@ jobs:
           make \
             O=out \
             ARCH=arm64 \
-            "$CONFIG"
+            "$KERNEL_CONFIG"
 
-      - name: Inspect KPROBES
+      - name: Integrate KernelSU v0.9.5
         working-directory: kernel
         run: |
-          echo "===== KPROBE DEFINITIONS ====="
+          echo "===== KERNELSU v0.9.5 ====="
 
-          grep -R -n \
-            'config KPROBES' \
-            kernel arch include drivers \
-            2>/dev/null | head -30 || true
+          curl -LSs \
+            "https://raw.githubusercontent.com/tiann/KernelSU/v0.9.5/kernel/setup.sh" \
+            -o /tmp/setup-ksu.sh
 
-          echo
-          echo "===== HAVE_KPROBES ====="
+          chmod +x /tmp/setup-ksu.sh
 
-          grep -R -n \
-            'config HAVE_KPROBES' \
-            arch include kernel drivers \
-            2>/dev/null | head -30 || true
+          /tmp/setup-ksu.sh
 
-          echo
-          echo "===== CURRENT CONFIG ====="
+          test -d drivers/kernelsu
 
-          grep -E \
-            '^CONFIG_(KPROBES|HAVE_KPROBES|KPROBE_EVENTS)=' \
-            out/.config || true
-
-      - name: Inspect dependencies
+      - name: Verify KernelSU source
         working-directory: kernel
         run: |
-          echo "===== KPROBE SOURCE ====="
+          echo "===== KSU SOURCE ====="
 
-          grep -R -n \
-            -B8 -A20 \
-            'config KPROBES' \
-            arch include kernel drivers \
-            2>/dev/null | head -100 || true
+          test -d drivers/kernelsu
+
+          echo "drivers/kernelsu found."
 
           echo
-          echo "===== ARCH KPROBE SUPPORT ====="
-
-          grep -R -n \
-            'HAVE_KPROBES' \
-            arch/arm64 \
-            2>/dev/null | head -100 || true
+          echo "===== KSU KCONFIG ====="
+          grep -n '^config KSU' \
+            drivers/kernelsu/Kconfig || true
 
           echo
-          echo "===== KPROBE MAKEFILE ====="
+          echo "===== KSU DRIVER ENTRY ====="
+          grep -n 'drivers/kernelsu/Kconfig' \
+            drivers/Kconfig || true
 
-          grep -R -n \
-            'kprobes' \
-            kernel/Kconfig* \
-            arch/arm64/Kconfig* \
-            arch/arm64/Makefile \
-            2>/dev/null | head -100 || true
-
-      - name: Test KPROBES with olddefconfig
+      - name: Enable KernelSU dependencies
         working-directory: kernel
         run: |
-          echo "===== TRY ENABLE KPROBES ====="
+          echo "===== ENABLE KSU DEPENDENCIES ====="
+
+          # KPROBES requires MODULES in this 4.19 kernel.
+          ./scripts/config \
+            --file out/.config \
+            --enable MODULES
 
           ./scripts/config \
             --file out/.config \
             --enable KPROBES
 
-          echo
-          echo "Before olddefconfig:"
+          ./scripts/config \
+            --file out/.config \
+            --enable KPROBE_EVENTS
 
           ./scripts/config \
             --file out/.config \
-            --state KPROBES || true
+            --enable KALLSYMS
 
-          grep '^CONFIG_KPROBES' out/.config || true
+          ./scripts/config \
+            --file out/.config \
+            --enable EXT4_FS
 
           echo
-          echo "Running olddefconfig..."
+          echo "===== BEFORE OLDDEFCONFIG ====="
+
+          ./scripts/config \
+            --file out/.config \
+            --state MODULES
+
+          ./scripts/config \
+            --file out/.config \
+            --state KPROBES
+
+          ./scripts/config \
+            --file out/.config \
+            --state KPROBE_EVENTS
+
+          ./scripts/config \
+            --file out/.config \
+            --state KALLSYMS
+
+          ./scripts/config \
+            --file out/.config \
+            --state EXT4_FS
+
+      - name: Regenerate kernel configuration
+        working-directory: kernel
+        run: |
+          echo "===== OLDDEFCONFIG ====="
 
           make \
             O=out \
             ARCH=arm64 \
             olddefconfig
 
+      - name: Verify KPROBES and KernelSU
+        working-directory: kernel
+        run: |
+          echo "===== FINAL KSU CONFIG ====="
+
+          grep -E \
+            '^CONFIG_(MODULES|KPROBES|KPROBE_EVENTS|KALLSYMS|EXT4_FS|KSU)=' \
+            out/.config || true
+
           echo
-          echo "After olddefconfig:"
+          echo "===== STATES ====="
 
           ./scripts/config \
             --file out/.config \
-            --state KPROBES || true
+            --state MODULES
 
-          grep -E \
-            '^CONFIG_(KPROBES|HAVE_KPROBES|KPROBE_EVENTS)=' \
-            out/.config || true
+          ./scripts/config \
+            --file out/.config \
+            --state KPROBES
+
+          ./scripts/config \
+            --file out/.config \
+            --state KPROBE_EVENTS
+
+          ./scripts/config \
+            --file out/.config \
+            --state KSU
+
+          echo
+
+          if ! grep -q '^CONFIG_MODULES=y' out/.config; then
+            echo "ERROR: CONFIG_MODULES is not enabled."
+            exit 1
+          fi
+
+          if ! grep -q '^CONFIG_KPROBES=y' out/.config; then
+            echo "ERROR: CONFIG_KPROBES is not enabled."
+            exit 1
+          fi
+
+          if ! grep -q '^CONFIG_EXT4_FS=y' out/.config; then
+            echo "ERROR: CONFIG_EXT4_FS is not enabled."
+            exit 1
+          fi
+
+          if ! grep -q '^CONFIG_KSU=y' out/.config; then
+            echo "ERROR: CONFIG_KSU is not enabled."
+            echo
+            echo "===== KSU KCONFIG ====="
+            cat drivers/kernelsu/Kconfig
+            exit 1
+          fi
+
+          echo
+          echo "======================================"
+          echo " CONFIG_KSU=y SUCCESS"
+          echo " CONFIG_KPROBES=y SUCCESS"
+          echo " CONFIG_MODULES=y SUCCESS"
+          echo "======================================"
+
+      - name: Build KernelSU kernel
+        working-directory: kernel
+        run: |
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
+
+          echo "===== BUILDING KERNEL ====="
+
+          make \
+            -j2 \
+            O=out \
+            ARCH=arm64 \
+            CC=clang \
+            HOSTCC=clang \
+            HOSTCXX=clang++ \
+            HOSTLD=ld.lld \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            Image.gz
+
+      - name: Verify Image.gz
+        working-directory: kernel
+        run: |
+          test -s out/arch/arm64/boot/Image.gz
+
+          echo "===== BUILD SUCCESS ====="
+          ls -lh out/arch/arm64/boot/Image.gz
+
+          echo
+          echo "===== KERNEL VERSION ====="
+          make O=out ARCH=arm64 kernelversion
+
+      - name: Prepare working directory
+        run: |
+          rm -rf work tools output verify
+
+          mkdir -p work
+          mkdir -p tools
+          mkdir -p output
+          mkdir -p verify
+
+      - name: Download original boot.img
+        run: |
+          echo "===== DOWNLOAD ORIGINAL BOOT ====="
+
+          API="https://api.github.com/repos/JBofficial-tech/kernelSu_redmi9a/releases/latest"
+
+          RELEASE=$(curl -fsSL "$API")
+
+          echo "Release:"
+          echo "$RELEASE" | jq -r '.name'
+          echo "$RELEASE" | jq -r '.tag_name'
+
+          BOOT_URL=$(echo "$RELEASE" \
+            | jq -r '.assets[] | select(.name == "boot.img") | .browser_download_url' \
+            | head -1)
+
+          if [ -z "$BOOT_URL" ] || [ "$BOOT_URL" = "null" ]; then
+            echo "ERROR: boot.img not found in latest release."
+
+            echo
+            echo "Available assets:"
+            echo "$RELEASE" | jq -r '.assets[].name'
+
+            exit 1
+          fi
+
+          echo "Downloading boot.img..."
+
+          curl -L \
+            --fail \
+            --retry 3 \
+            "$BOOT_URL" \
+            -o work/boot.img
+
+          test -s work/boot.img
+
+          echo
+          echo "===== ORIGINAL BOOT ====="
+          ls -lh work/boot.img
+          file work/boot.img
+          sha256sum work/boot.img
+
+      - name: Prepare KernelSU Image
+        run: |
+          test -s kernel/out/arch/arm64/boot/Image.gz
+
+          cp \
+            kernel/out/arch/arm64/boot/Image.gz \
+            work/Image.gz
+
+          echo "===== DECOMPRESS KERNEL ====="
+
+          gzip -dc \
+            work/Image.gz \
+            > work/Image
+
+          test -s work/Image
+
+          echo "===== KERNEL FILES ====="
+          ls -lh work/Image.gz
+          ls -lh work/Image
+
+          file work/Image
+
+      - name: Download Magisk release
+        run: |
+          curl -fsSL \
+            "https://api.github.com/repos/topjohnwu/Magisk/releases/latest" \
+            -o /tmp/magisk.json
+
+          echo "===== MAGISK RELEASE ====="
+          jq -r '.tag_name' /tmp/magisk.json
+
+      - name: Get magiskboot
+        run: |
+          echo "===== FIND MAGISKBOOT ====="
+
+          URL=$(jq -r '
+            .assets[]
+            | select(
+                (.name | ascii_downcase | contains("magiskboot"))
+                and
+                (.name | ascii_downcase | contains("x86_64"))
+              )
+            | .browser_download_url
+          ' /tmp/magisk.json | head -1)
+
+          if [ -z "$URL" ] || [ "$URL" = "null" ]; then
+            echo "ERROR: magiskboot asset not found."
+
+            jq -r '.assets[].name' /tmp/magisk.json
+
+            exit 1
+          fi
+
+          echo "URL:"
+          echo "$URL"
+
+          curl -L \
+            --fail \
+            --retry 3 \
+            "$URL" \
+            -o tools/magiskboot
+
+          chmod +x tools/magiskboot
+
+          echo
+          echo "===== MAGISKBOOT ====="
+          file tools/magiskboot
+
+      - name: Unpack original boot
+        working-directory: work
+        run: |
+          echo "===== UNPACK ORIGINAL BOOT ====="
+
+          ../tools/magiskboot \
+            unpack \
+            boot.img
+
+          echo
+          echo "===== UNPACKED ====="
+          ls -lah
+
+          test -f kernel
+
+      - name: Save original kernel
+        working-directory: work
+        run: |
+          cp kernel original-kernel
+
+          echo "===== ORIGINAL KERNEL ====="
+          file original-kernel
+          ls -lh original-kernel
+
+      - name: Replace kernel
+        working-directory: work
+        run: |
+          echo "===== REPLACE KERNEL ====="
+
+          cp Image kernel
+
+          test -s kernel
+
+          echo
+          echo "===== NEW KERNEL ====="
+          file kernel
+          ls -lh kernel
+
+      - name: Repack boot image
+        working-directory: work
+        run: |
+          echo "===== REPACK BOOT ====="
+
+          ../tools/magiskboot \
+            repack \
+            boot.img \
+            boot-KSU.img
+
+          test -s boot-KSU.img
+
+          echo
+          echo "===== REPACK SUCCESS ====="
+          ls -lh boot-KSU.img
+          file boot-KSU.img
+          sha256sum boot-KSU.img
+
+      - name: Verify final boot image
+        run: |
+          echo "===== FINAL BOOT VERIFICATION ====="
+
+          cp \
+            work/boot-KSU.img \
+            verify/boot-KSU.img
+
+          cd verify
+
+          ../../tools/magiskboot \
+            unpack \
+            boot-KSU.img
+
+          test -s kernel
+
+          echo
+          echo "===== FINAL IMAGE VERIFIED ====="
+          ls -lah
+          file kernel
+          sha256sum kernel
+
+      - name: Prepare final artifacts
+        run: |
+          echo "===== PREPARE ARTIFACT ====="
+
+          cp \
+            work/boot-KSU.img \
+            output/boot-KSU.img
+
+          cp \
+            work/boot.img \
+            output/original-boot.img
+
+          cp \
+            kernel/out/arch/arm64/boot/Image.gz \
+            output/KernelSU-Image.gz
+
+          cp \
+            kernel/out/.config \
+            output/kernel-config
+
+          sha256sum \
+            output/boot-KSU.img \
+            output/original-boot.img \
+            output/KernelSU-Image.gz \
+            > output/SHA256SUMS.txt
+
+          echo \
+            "Redmi 9A KernelSU v0.9.5 final boot image." \
+            > output/BUILD_SUCCESS.txt
+
+          echo
+          echo "===== FINAL FILES ====="
+          ls -lh output
+
+      - name: Upload final artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Redmi9A-KernelSU-v0.9.5-Final
+          path: output/
