@@ -1,4 +1,4 @@
-name: Redmi 9A - KernelSU Build
+name: Redmi 9A - KernelSU v0.9.5 Build
 
 on:
   workflow_dispatch:
@@ -21,7 +21,7 @@ jobs:
             binutils-aarch64-linux-gnu \
             libssl-dev libelf-dev \
             python3 rsync cpio \
-            device-tree-compiler
+            device-tree-compiler curl
 
       - name: Clone Niigo kernel
         run: |
@@ -29,7 +29,7 @@ jobs:
             https://github.com/TelegramAt25/niigo_kernel_xiaomi_blossom.git \
             kernel
 
-      - name: Verify kernel source
+      - name: Verify kernel
         working-directory: kernel
         run: |
           test -f Makefile
@@ -40,18 +40,18 @@ jobs:
           echo "===== KERNEL VERSION ====="
           make kernelversion
 
-          echo "===== SOURCE COMMIT ====="
+          echo "===== SOURCE ====="
           git log -1 --oneline
 
-      - name: Find defconfig
+      - name: Find Redmi 9A defconfig
         working-directory: kernel
         run: |
-          echo "===== CONFIG FILES ====="
+          echo "===== AVAILABLE DEVICE CONFIGS ====="
 
           find arch/arm64/configs \
             -type f \
             | grep -Ei 'blossom|dandelion|mt6765' \
-            | head -50 || true
+            | head -100
 
           CONFIG=""
 
@@ -67,7 +67,7 @@ jobs:
           done
 
           if [ -z "$CONFIG" ]; then
-            echo "ERROR: Suitable defconfig not found."
+            echo "ERROR: Redmi 9A defconfig not found."
             exit 1
           fi
 
@@ -84,69 +84,53 @@ jobs:
             ARCH=arm64 \
             "$KERNEL_CONFIG"
 
-      - name: Download KernelSU
+      - name: Check Kprobe requirements
         working-directory: kernel
         run: |
-          echo "===== DOWNLOADING KERNELSU ====="
+          echo "===== KPROBE CONFIG ====="
 
-          rm -rf drivers/kernelsu
+          grep '^CONFIG_KPROBES=' out/.config || true
+          grep '^CONFIG_HAVE_KPROBES=' out/.config || true
+          grep '^CONFIG_KPROBE_EVENTS=' out/.config || true
+          grep '^CONFIG_MODULES=' out/.config || true
+
+      - name: Integrate KernelSU v0.9.5
+        working-directory: kernel
+        run: |
+          echo "===== KERNELSU v0.9.5 ====="
 
           curl -LSs \
-            https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh \
-            -o /tmp/ksu-setup.sh
+            "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" \
+            | bash -s v0.9.5
 
-          chmod +x /tmp/ksu-setup.sh
-
-          /tmp/ksu-setup.sh
-
-      - name: Verify KernelSU source
+      - name: Verify KernelSU integration
         working-directory: kernel
         run: |
-          echo "===== KERNELSU SOURCE ====="
+          echo "===== KERNELSU DIRECTORY ====="
 
-          if [ -d drivers/kernelsu ]; then
-            echo "drivers/kernelsu exists"
-            find drivers/kernelsu -maxdepth 2 -type f | head -50
-          else
-            echo "ERROR: drivers/kernelsu was not created."
-            exit 1
-          fi
+          test -d drivers/kernelsu
 
-      - name: Register KernelSU in Kconfig
-        working-directory: kernel
-        run: |
-          echo "===== REGISTERING KERNELSU ====="
-
-          if grep -q 'source "drivers/kernelsu/Kconfig"' drivers/Kconfig; then
-            echo "KernelSU already registered."
-          else
-            printf '\nsource "drivers/kernelsu/Kconfig"\n' >> drivers/Kconfig
-            echo "KernelSU Kconfig entry added."
-          fi
+          ls -la drivers/kernelsu
 
           echo
-          echo "===== CHECK ====="
+          echo "===== KCONFIG ENTRY ====="
           grep -n 'drivers/kernelsu/Kconfig' drivers/Kconfig
 
-      - name: Check KernelSU Kconfig
-        working-directory: kernel
-        run: |
-          echo "===== KSU CONFIG SYMBOLS ====="
+          echo
+          echo "===== MAKEFILE ENTRY ====="
+          grep -n 'CONFIG_KSU.*kernelsu' drivers/Makefile
 
-          grep -R \
-            -n \
-            -E 'config KSU|CONFIG_KSU' \
+          echo
+          echo "===== KSU SYMBOL ====="
+          grep -R -n \
+            '^config KSU' \
             drivers/kernelsu \
-            | head -50 || true
+            | head -20
 
-      - name: Enable KernelSU
+      - name: Enable required configs
         working-directory: kernel
         run: |
-          echo "===== ENABLING KSU ====="
-
-          ./scripts/config \
-            --file out/.config \
-            --enable CONFIG_KSU
+          echo "===== ENABLING KPROBE ====="
 
           ./scripts/config \
             --file out/.config \
@@ -154,33 +138,64 @@ jobs:
 
           ./scripts/config \
             --file out/.config \
+            --enable CONFIG_HAVE_KPROBES
+
+          ./scripts/config \
+            --file out/.config \
             --enable CONFIG_KPROBE_EVENTS
+
+          ./scripts/config \
+            --file out/.config \
+            --enable CONFIG_MODULES
 
           ./scripts/config \
             --file out/.config \
             --enable CONFIG_KALLSYMS
 
+          echo
+          echo "===== CONFIG BEFORE OLDDEFCONFIG ====="
+
+          grep -E \
+            '^CONFIG_(KSU|KPROBES|HAVE_KPROBES|KPROBE_EVENTS|MODULES|KALLSYMS)=' \
+            out/.config \
+            || true
+
+      - name: Regenerate kernel config
+        working-directory: kernel
+        run: |
           make \
             O=out \
             ARCH=arm64 \
             olddefconfig
 
-      - name: Verify KSU configuration
+      - name: Verify KernelSU config
         working-directory: kernel
         run: |
-          echo "===== FINAL KSU CONFIG ====="
+          echo "===== FINAL CONFIG ====="
+
+          grep -E \
+            '^CONFIG_(KSU|KPROBES|HAVE_KPROBES|KPROBE_EVENTS|MODULES|KALLSYMS)=' \
+            out/.config \
+            || true
 
           if grep -q '^CONFIG_KSU=y' out/.config; then
-            echo "CONFIG_KSU=y"
-          else
-            echo "ERROR: CONFIG_KSU was not enabled."
             echo
-            echo "Relevant configuration:"
-            grep -Ei 'KSU|KPROBE|KALLSYMS' out/.config || true
+            echo "================================"
+            echo "CONFIG_KSU=y SUCCESS"
+            echo "================================"
+          else
+            echo
+            echo "ERROR: CONFIG_KSU is still unavailable."
+            echo
+            echo "KSU Kconfig:"
+            cat drivers/kernelsu/Kconfig || true
+            echo
+            echo "KSU Makefile:"
+            cat drivers/kernelsu/Makefile || true
             exit 1
           fi
 
-      - name: Build kernel
+      - name: Build KernelSU kernel
         working-directory: kernel
         run: |
           export ARCH=arm64
@@ -198,13 +213,12 @@ jobs:
             CROSS_COMPILE=aarch64-linux-gnu- \
             Image.gz
 
-      - name: Verify final kernel
+      - name: Verify build
         working-directory: kernel
         run: |
-          echo "===== BUILD RESULT ====="
-
           test -f out/arch/arm64/boot/Image.gz
 
+          echo "===== BUILD SUCCESS ====="
           ls -lh out/arch/arm64/boot/Image.gz
 
           echo
@@ -227,11 +241,18 @@ jobs:
             kernel/out/.config \
             output/kernel-config
 
-          echo "KernelSU build successful." \
+          cp \
+            kernel/Makefile \
+            output/kernel-Makefile
+
+          echo "KernelSU v0.9.5 build successful." \
             > output/BUILD_SUCCESS.txt
+
+          echo "===== ARTIFACT ====="
+          ls -lh output
 
       - name: Upload KernelSU kernel
         uses: actions/upload-artifact@v4
         with:
-          name: Redmi9A-KernelSU
+          name: Redmi9A-KernelSU-v0.9.5
           path: output/
