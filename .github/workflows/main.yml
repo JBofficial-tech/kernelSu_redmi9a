@@ -584,7 +584,7 @@ jobs:
 
           cd verify
 
-          ../../tools/magiskboot \
+          ../tools/magiskboot \
             unpack \
             boot-KSU.img
 
