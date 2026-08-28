@@ -118,22 +118,62 @@ jobs:
           echo "===== KSU SYMBOL ====="
           grep -R -n '^config KSU' drivers/kernelsu || true
 
-      - name: Enable KernelSU requirements
+            - name: Enable KernelSU requirements
         working-directory: kernel
         run: |
           echo "===== ENABLE KSU REQUIREMENTS ====="
 
           ./scripts/config \
             --file out/.config \
-            --enable CONFIG_KPROBES
+            --enable KPROBES
 
           ./scripts/config \
             --file out/.config \
-            --enable CONFIG_KPROBE_EVENTS
+            --enable KPROBE_EVENTS
 
           ./scripts/config \
             --file out/.config \
-            --enable CONFIG_KALLSYMS
+            --enable KALLSYMS
 
           ./scripts/config \
+            --file out/.config \
+            --enable EXT4_FS
+
+          echo
+          echo "===== CONFIG BEFORE OLDDEFCONFIG ====="
+
+          grep -E \
+            '^CONFIG_(KPROBES|KPROBE_EVENTS|KALLSYMS|EXT4_FS)=' \
+            out/.config \
+            || true
+
+      - name: Regenerate kernel config
+        working-directory: kernel
+        run: |
+          make \
+            O=out \
+            ARCH=arm64 \
+            olddefconfig
+
+      - name: Verify KernelSU config
+        working-directory: kernel
+        run: |
+          echo "===== FINAL KSU CONFIG ====="
+
+          grep -E \
+            '^CONFIG_(KSU|KPROBES|KPROBE_EVENTS|KALLSYMS|EXT4_FS)=' \
+            out/.config \
+            || true
+
+          if grep -q '^CONFIG_KSU=y' out/.config; then
+            echo "================================"
+            echo "CONFIG_KSU=y SUCCESS"
+            echo "================================"
+          else
+            echo "ERROR: CONFIG_KSU was not enabled."
+            echo
+            echo "===== KSU KCONFIG ====="
+            cat drivers/kernelsu/Kconfig || true
+            exit 1
+          fi
            
