@@ -1,169 +1,139 @@
-name: Redmi 9A - KernelSU Boot Repack
+name: Redmi 9A - KernelSU Build and Boot Repack
 
 on:
   workflow_dispatch:
 
 jobs:
-  repack:
+  build:
     runs-on: ubuntu-22.04
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Download original boot.img
+      - name: Install dependencies
         run: |
-          mkdir -p work
+          sudo apt-get update
+          sudo apt-get install -y \
+            git curl jq bc bison flex build-essential \
+            clang llvm lld \
+            gcc-aarch64-linux-gnu \
+            binutils-aarch64-linux-gnu \
+            libssl-dev libelf-dev \
+            python3 rsync cpio \
+            device-tree-compiler
 
-          curl -L --fail --retry 3 \
-            "https://github.com/JBofficial-tech/kernelSu_redmi9a/releases/download/v1.0/boot.img" \
-            -o work/boot.img
-
-          echo "===== ORIGINAL BOOT ====="
-          ls -lh work/boot.img
-          file work/boot.img
-          sha256sum work/boot.img
-
-      - name: Download KernelSU build
-        uses: actions/download-artifact@v4
-        with:
-          name: Redmi9A-KernelSU-v0.9.5
-          path: work/ksu
-
-      - name: Locate kernel
+      - name: Clone verified Niigo kernel
         run: |
-          echo "===== KSU ARTIFACT ====="
-          find work/ksu -type f -maxdepth 3 -print
+          git clone --depth=1 \
+            https://github.com/TelegramAt25/niigo_kernel_xiaomi_blossom.git \
+            kernel
 
-          KERNEL=""
+      - name: Verify kernel source
+        working-directory: kernel
+        run: |
+          test -f Makefile
+          test -d arch
+          test -d drivers
+          test -d include
 
-          for f in \
-            work/ksu/Image.gz \
-            work/ksu/Image \
-            work/ksu/kernel/Image.gz \
-            work/ksu/kernel/Image
+          echo "===== KERNEL VERSION ====="
+          make kernelversion
+
+          echo "===== SOURCE COMMIT ====="
+          git log -1 --oneline
+
+      - name: Find Redmi 9A defconfig
+        working-directory: kernel
+        run: |
+          echo "===== AVAILABLE CONFIGS ====="
+
+          find arch/arm64/configs \
+            -type f \
+            | grep -Ei 'blossom|dandelion|mt6765' \
+            | head -100 || true
+
+          CONFIG=""
+
+          for cfg in \
+            blossom_defconfig \
+            dandelion_defconfig \
+            mt6765_defconfig
           do
-            if [ -f "$f" ]; then
-              KERNEL="$f"
+            if [ -f "arch/arm64/configs/$cfg" ]; then
+              CONFIG="$cfg"
               break
             fi
           done
 
-          if [ -z "$KERNEL" ]; then
-            echo "ERROR: Kernel image not found."
+          if [ -z "$CONFIG" ]; then
+            echo "ERROR: Redmi 9A defconfig not found."
             exit 1
           fi
 
-          cp "$KERNEL" work/Image.gz
+          echo "Using defconfig: $CONFIG"
+          echo "KERNEL_CONFIG=$CONFIG" >> "$GITHUB_ENV"
 
-          echo "Using kernel:"
-          ls -lh work/Image.gz
-
-      - name: Download magiskboot
+      - name: Configure kernel
+        working-directory: kernel
         run: |
-          mkdir -p tools
+          mkdir -p out
 
-          curl -L --fail \
-            "https://github.com/topjohnwu/Magisk/raw/master/scripts/magiskboot" \
-            -o tools/magiskboot
+          make \
+            O=out \
+            ARCH=arm64 \
+            "$KERNEL_CONFIG"
 
-          chmod +x tools/magiskboot
-
-          ./tools/magiskboot --help
-
-      - name: Unpack original boot
-        working-directory: work
+      - name: Integrate KernelSU v0.9.5
+        working-directory: kernel
         run: |
-          ../tools/magiskboot unpack boot.img
+          echo "===== INSTALLING KERNELSU v0.9.5 ====="
 
-          echo "===== UNPACKED FILES ====="
-          ls -lah
+          curl -LSs \
+            https://raw.githubusercontent.com/tiann/KernelSU/v0.9.5/kernel/setup.sh \
+            -o /tmp/ksu-setup.sh
+
+          chmod +x /tmp/ksu-setup.sh
+
+          /tmp/ksu-setup.sh
+
+      - name: Verify KernelSU integration
+        working-directory: kernel
+        run: |
+          echo "===== KERNELSU DIRECTORY ====="
+
+          test -d drivers/kernelsu
+
+          echo "drivers/kernelsu found."
 
           echo
-          echo "===== KERNEL ====="
-          file kernel || true
-          ls -lh kernel || true
+          echo "===== KCONFIG ====="
+          grep -n 'drivers/kernelsu/Kconfig' drivers/Kconfig || true
 
           echo
-          echo "===== RAMDISK ====="
-          file ramdisk.cpio* || true
-
-      - name: Save original kernel
-        working-directory: work
-        run: |
-          if [ -f kernel ]; then
-            cp kernel original-kernel
-            echo "Original kernel saved."
-          else
-            echo "ERROR: magiskboot did not extract kernel."
-            exit 1
-          fi
-
-      - name: Replace kernel
-        working-directory: work
-        run: |
-          echo "===== REPLACING KERNEL ====="
-
-          cp Image.gz kernel
-
-          echo "New kernel:"
-          ls -lh kernel
-          file kernel
-
-      - name: Repack boot image
-        working-directory: work
-        run: |
-          echo "===== REPACKING ====="
-
-          ../tools/magiskboot repack boot.img new-boot.img
-
-          test -f new-boot.img
+          echo "===== MAKEFILE ====="
+          grep -n 'kernelsu' drivers/Makefile || true
 
           echo
-          echo "===== NEW BOOT ====="
-          ls -lh new-boot.img
-          file new-boot.img
-          sha256sum new-boot.img
+          echo "===== KSU SYMBOL ====="
+          grep -R -n '^config KSU' drivers/kernelsu || true
 
-      - name: Test new boot image
-        working-directory: work
+      - name: Enable KernelSU requirements
+        working-directory: kernel
         run: |
-          echo "===== TESTING REPACKED IMAGE ====="
+          echo "===== ENABLE KSU REQUIREMENTS ====="
 
-          ../tools/magiskboot unpack new-boot.img
+          ./scripts/config \
+            --file out/.config \
+            --enable CONFIG_KPROBES
 
-          echo
-          echo "===== REPACK RESULT ====="
-          ls -lh
+          ./scripts/config \
+            --file out/.config \
+            --enable CONFIG_KPROBE_EVENTS
 
-          test -f kernel
+          ./scripts/config \
+            --file out/.config \
+            --enable CONFIG_KALLSYMS
 
-          echo
-          echo "Repacked boot image is structurally readable."
-
-      - name: Prepare final artifact
-        run: |
-          mkdir -p output
-
-          cp work/new-boot.img \
-            output/boot-KernelSU-v0.9.5.img
-
-          cp work/boot.img \
-            output/original-boot.img
-
-          sha256sum \
-            output/boot-KernelSU-v0.9.5.img \
-            > output/SHA256SUMS.txt
-
-          echo "KernelSU v0.9.5 boot image repack completed." \
-            > output/BUILD_SUCCESS.txt
-
-          echo
-          echo "===== FINAL OUTPUT ====="
-          ls -lh output
-
-      - name: Upload boot images
-        uses: actions/upload-artifact@v4
-        with:
-          name: Redmi9A-KernelSU-Boot
-          path: output/
+          ./scripts/config \
+           
