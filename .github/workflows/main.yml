@@ -23,13 +23,13 @@ jobs:
             python3 rsync cpio \
             device-tree-compiler
 
-      - name: Clone verified Niigo kernel
+      - name: Clone Niigo kernel
         run: |
           git clone --depth=1 \
             https://github.com/TelegramAt25/niigo_kernel_xiaomi_blossom.git \
             kernel
 
-      - name: Verify kernel tree
+      - name: Verify kernel source
         working-directory: kernel
         run: |
           test -f Makefile
@@ -43,15 +43,15 @@ jobs:
           echo "===== SOURCE COMMIT ====="
           git log -1 --oneline
 
-      - name: Find device config
+      - name: Find defconfig
         working-directory: kernel
         run: |
-          echo "===== AVAILABLE CONFIGS ====="
+          echo "===== CONFIG FILES ====="
 
           find arch/arm64/configs \
             -type f \
             | grep -Ei 'blossom|dandelion|mt6765' \
-            | head -50
+            | head -50 || true
 
           CONFIG=""
 
@@ -67,11 +67,11 @@ jobs:
           done
 
           if [ -z "$CONFIG" ]; then
-            echo "ERROR: Redmi 9A/Blossom defconfig not found."
+            echo "ERROR: Suitable defconfig not found."
             exit 1
           fi
 
-          echo "Using: $CONFIG"
+          echo "Using $CONFIG"
           echo "KERNEL_CONFIG=$CONFIG" >> "$GITHUB_ENV"
 
       - name: Configure kernel
@@ -84,34 +84,65 @@ jobs:
             ARCH=arm64 \
             "$KERNEL_CONFIG"
 
-      - name: Integrate KernelSU
+      - name: Download KernelSU
         working-directory: kernel
         run: |
-          echo "===== INSTALLING KERNELSU ====="
+          echo "===== DOWNLOADING KERNELSU ====="
+
+          rm -rf drivers/kernelsu
 
           curl -LSs \
             https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh \
-            | bash -
+            -o /tmp/ksu-setup.sh
 
-          echo
-          echo "===== KERNELSU FILES ====="
+          chmod +x /tmp/ksu-setup.sh
 
-          test -d drivers/kernelsu || \
-            test -d drivers/ksu || \
-            {
-              echo "ERROR: KernelSU integration directory not found."
-              exit 1
-            }
+          /tmp/ksu-setup.sh
 
-      - name: Enable KernelSU configuration
+      - name: Verify KernelSU source
         working-directory: kernel
         run: |
-          echo "===== CONFIGURING KERNELSU ====="
+          echo "===== KERNELSU SOURCE ====="
 
-          if [ ! -f scripts/config ]; then
-            echo "ERROR: scripts/config not found."
+          if [ -d drivers/kernelsu ]; then
+            echo "drivers/kernelsu exists"
+            find drivers/kernelsu -maxdepth 2 -type f | head -50
+          else
+            echo "ERROR: drivers/kernelsu was not created."
             exit 1
           fi
+
+      - name: Register KernelSU in Kconfig
+        working-directory: kernel
+        run: |
+          echo "===== REGISTERING KERNELSU ====="
+
+          if grep -q 'source "drivers/kernelsu/Kconfig"' drivers/Kconfig; then
+            echo "KernelSU already registered."
+          else
+            printf '\nsource "drivers/kernelsu/Kconfig"\n' >> drivers/Kconfig
+            echo "KernelSU Kconfig entry added."
+          fi
+
+          echo
+          echo "===== CHECK ====="
+          grep -n 'drivers/kernelsu/Kconfig' drivers/Kconfig
+
+      - name: Check KernelSU Kconfig
+        working-directory: kernel
+        run: |
+          echo "===== KSU CONFIG SYMBOLS ====="
+
+          grep -R \
+            -n \
+            -E 'config KSU|CONFIG_KSU' \
+            drivers/kernelsu \
+            | head -50 || true
+
+      - name: Enable KernelSU
+        working-directory: kernel
+        run: |
+          echo "===== ENABLING KSU ====="
 
           ./scripts/config \
             --file out/.config \
@@ -134,24 +165,22 @@ jobs:
             ARCH=arm64 \
             olddefconfig
 
-      - name: Verify KernelSU configuration
+      - name: Verify KSU configuration
         working-directory: kernel
         run: |
-          echo "===== KSU CONFIG ====="
+          echo "===== FINAL KSU CONFIG ====="
 
-          grep '^CONFIG_KSU=' out/.config || {
-            echo "ERROR: CONFIG_KSU is not enabled."
+          if grep -q '^CONFIG_KSU=y' out/.config; then
+            echo "CONFIG_KSU=y"
+          else
+            echo "ERROR: CONFIG_KSU was not enabled."
+            echo
+            echo "Relevant configuration:"
+            grep -Ei 'KSU|KPROBE|KALLSYMS' out/.config || true
             exit 1
-          }
+          fi
 
-          grep '^CONFIG_KPROBES=' out/.config || true
-          grep '^CONFIG_KPROBE_EVENTS=' out/.config || true
-          grep '^CONFIG_KALLSYMS=' out/.config || true
-
-          echo
-          echo "KernelSU configuration verified."
-
-      - name: Build Kernel
+      - name: Build kernel
         working-directory: kernel
         run: |
           export ARCH=arm64
@@ -172,7 +201,7 @@ jobs:
       - name: Verify final kernel
         working-directory: kernel
         run: |
-          echo "===== FINAL KERNEL ====="
+          echo "===== BUILD RESULT ====="
 
           test -f out/arch/arm64/boot/Image.gz
 
@@ -183,14 +212,8 @@ jobs:
           make O=out ARCH=arm64 kernelversion
 
           echo
-          echo "===== KSU CONFIG ====="
-          grep '^CONFIG_KSU=' out/.config
-
-          echo
-          echo "===== KSU STRINGS ====="
-          strings out/arch/arm64/boot/Image.gz \
-            | grep -i 'kernelsu\|kernelsu' \
-            | head -20 || true
+          echo "===== KSU ====="
+          grep '^CONFIG_KSU=y' out/.config
 
       - name: Prepare artifact
         run: |
@@ -204,15 +227,8 @@ jobs:
             kernel/out/.config \
             output/kernel-config
 
-          cp \
-            kernel/Makefile \
-            output/kernel-Makefile
-
-          echo "KernelSU build completed." \
+          echo "KernelSU build successful." \
             > output/BUILD_SUCCESS.txt
-
-          echo "===== OUTPUT ====="
-          ls -lh output
 
       - name: Upload KernelSU kernel
         uses: actions/upload-artifact@v4
